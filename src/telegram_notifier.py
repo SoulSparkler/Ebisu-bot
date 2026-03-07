@@ -12,7 +12,9 @@ from typing import Dict
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
-load_dotenv("/root/4coins_live/.env")
+from pathlib import Path as _Path
+_env_path = _Path(__file__).parent.parent / ".env"
+load_dotenv(str(_env_path))
 
 
 class TelegramNotifier:

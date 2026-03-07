@@ -40,7 +40,12 @@ class MultiTrader:
         for name in strategy_names:
             log_dir = project_root / "logs" / name
             log_dir.mkdir(parents=True, exist_ok=True)
-            self.traders[name] = Trader(capital=capital_per_strategy, log_dir=str(log_dir), config=config)
+            # Extract coin from strategy name (e.g. 'late_v3_btc' -> 'btc')
+            parts = name.rsplit('_', 1)
+            coin = parts[-1] if len(parts) > 1 else ''
+            trader = Trader(capital=capital_per_strategy, log_dir=str(log_dir), config=config, strategy_name=name)
+            trader.coin = coin
+            self.traders[name] = trader
             print(f"[MULTI-TRADER] Initialized {name} with ${capital_per_strategy:,.0f}")
         
         print(f"[MULTI-TRADER] Total portfolio: ${len(self.traders) * capital_per_strategy:,.0f}")

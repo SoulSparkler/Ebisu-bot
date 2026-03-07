@@ -3,24 +3,18 @@ Trade Logger - Detailed logging of all buy/sell operations
 """
 import json
 import logging
-from pathlib import Path
-from datetime import datetime
 from typing import Optional, Dict
 
-# Setup trades logger
-# Determine logs path relative to project
-project_root = Path(__file__).parent.parent
-log_dir = project_root / "logs"
-log_dir.mkdir(exist_ok=True)
-
+# Use stdout logging for Railway (no file handler)
 trades_logger = logging.getLogger('trades')
 trades_logger.setLevel(logging.INFO)
-trades_handler = logging.FileHandler(log_dir / 'trades.log')
-trades_handler.setFormatter(logging.Formatter(
-    '%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-))
-trades_logger.addHandler(trades_handler)
+if not trades_logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    ))
+    trades_logger.addHandler(handler)
 
 def log_buy_attempt(market_slug: str, side: str, contracts: float, price: float, attempt: int, max_attempts: int):
     """Log a buy order attempt"""

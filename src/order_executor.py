@@ -219,9 +219,7 @@ class OrderExecutor:
              'outputs': [{'name': '', 'type': 'uint8'}], 'type': 'function'}
         ]
         
-        # Order logging
-        self.orders_log = Path("logs/orders.jsonl")
-        self.orders_log.parent.mkdir(exist_ok=True)
+        # Order logging (PostgreSQL via db module)
         
         # Callback for tracking balance changes
         self.balance_change_callback = None
@@ -252,21 +250,22 @@ class OrderExecutor:
         self.market_closing_check_callback = callback
         print("[EXECUTOR] ✓ Market closing check callback registered")
     
-    def _log_redeem(self, market_slug: str, success: bool, amount: float, tx_hash: str = "", reason: str = ""):
-        """Log redeem operation to separate file"""
+    def _log_redeem(self, market_slug: str, success: bool, amount: float,
+                    tx_hash: str = "", reason: str = ""):
+        """Log redeem to PostgreSQL"""
         try:
-            import os
-            from datetime import datetime
-            
-            log_file = "logs/redeem.log"
-            os.makedirs(os.path.dirname(log_file), exist_ok=True)
-            
-            with open(log_file, 'a') as f:
-                timestamp = datetime.now().isoformat()
-                status = "SUCCESS" if success else "FAILED"
-                f.write(f"{timestamp} | {market_slug} | {status} | ${amount:.2f} | {tx_hash} | {reason}\n")
+            from db import save_trade
+            save_trade({
+                'market_slug': market_slug,
+                'winner': 'REDEEM',
+                'pnl': amount,
+                'exit_type': 'redeem',
+                'exit_reason': reason,
+                'tx_hash': tx_hash,
+                'success': success
+            })
         except Exception as e:
-            print(f"[ERROR] Failed to log redeem: {e}")
+            print(f"[EXECUTOR] ⚠️ Failed to log redeem: {e}")
     
     def get_wallet_usdc_balance(self) -> Optional[float]:
         """
@@ -1921,31 +1920,26 @@ class OrderExecutor:
     
     def _log_order(self, market_slug: str, side: str, contracts: float,
                    price: float, result: OrderResult, order_type: str, fak_attempt: int = 1):
-        """Write order to log (each FAK attempt separately)"""
-        log_entry = {
-            'timestamp': time.time(),
-            'datetime': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'market_slug': market_slug,
-            'side': order_type,
-            'order_type': order_type,
-            'fak_attempt': fak_attempt,
-            'contracts': contracts,
-            'price': price,
-            'size_usd': contracts * price if contracts and price else 0,
-            'total_spent_usd': result.total_spent_usd,
-            'success': result.success,
-            'order_id': result.order_id,
-            'error': result.error,
-            'dry_run': result.dry_run,
-            'elapsed_ms': result.elapsed_ms,
-            'attempts_total': result.attempts
-        }
-        
-        orders_log_path = Path(self.config.get('logging', {}).get('orders_file', 'logs/orders.jsonl'))
-        os.makedirs(orders_log_path.parent, exist_ok=True)
-        
-        with open(orders_log_path, 'a') as f:
-            f.write(json.dumps(log_entry) + '\n')
+        """Save order to PostgreSQL"""
+        try:
+            from db import save_order
+            save_order({
+                'market_slug': market_slug,
+                'side': side,
+                'order_type': order_type,
+                'fak_attempt': fak_attempt,
+                'contracts': contracts,
+                'price': price,
+                'size_usd': contracts * price if contracts and price else 0,
+                'total_spent_usd': result.total_spent_usd,
+                'success': result.success,
+                'order_id': result.order_id,
+                'error': result.error,
+                'dry_run': result.dry_run,
+                'elapsed_ms': result.elapsed_ms
+            })
+        except Exception as e:
+            print(f"[EXECUTOR] ⚠️ Failed to log order: {e}")
     
     def redeem_position(self, market_slug: str, condition_id: str, 
                         up_token_id: str, down_token_id: str, 
@@ -2041,30 +2035,28 @@ class OrderExecutor:
             # Silent fail - don't want Telegram error to break trading
             print(f"[EXECUTOR] ⚠ Telegram exception: {e}")
     
-    def _log_order(self, market_slug: str, side: str, contracts: float, 
+    def _log_order(self, market_slug: str, side: str, contracts: float,
                    price: float, result: OrderResult, order_type: str, fak_attempt: int = 1):
-        """Write order to log (each FAK attempt separately)"""
-        log_entry = {
-            'timestamp': time.time(),
-            'datetime': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'market_slug': market_slug,
-            'side': side,
-            'order_type': order_type,  # BUY or SELL
-            'fak_attempt': fak_attempt,  # FAK attempt number
-            'contracts': contracts,
-            'price': price,
-            'size_usd': contracts * price,
-            'total_spent_usd': result.total_spent_usd,
-            'success': result.success,
-            'order_id': result.order_id,
-            'error': result.error,
-            'dry_run': result.dry_run,
-            'elapsed_ms': result.elapsed_ms,
-            'attempts_total': result.attempts
-        }
-        
-        with open(self.orders_log, 'a') as f:
-            f.write(json.dumps(log_entry) + '\n')
+        """Save order to PostgreSQL"""
+        try:
+            from db import save_order
+            save_order({
+                'market_slug': market_slug,
+                'side': side,
+                'order_type': order_type,
+                'fak_attempt': fak_attempt,
+                'contracts': contracts,
+                'price': price,
+                'size_usd': contracts * price if contracts and price else 0,
+                'total_spent_usd': result.total_spent_usd,
+                'success': result.success,
+                'order_id': result.order_id,
+                'error': result.error,
+                'dry_run': result.dry_run,
+                'elapsed_ms': result.elapsed_ms
+            })
+        except Exception as e:
+            print(f"[EXECUTOR] ⚠️ Failed to log order: {e}")
     
     def redeem_position(self, market_slug: str, condition_id: str, 
                         up_token_id: str, down_token_id: str, 

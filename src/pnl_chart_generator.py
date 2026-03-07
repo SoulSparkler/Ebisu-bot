@@ -14,7 +14,7 @@ def load_trades(log_dir: str, coins: List[str]) -> Dict[str, List[Dict]]:
     all_trades = {}
     
     # DEBUG: Write to file too
-    debug_file = "/root/4coins_live/logs/chart_debug.log"
+    debug_file = "logs/chart_debug.log"
     with open(debug_file, 'a') as f:
         f.write(f"\n{'='*80}\n")
         f.write(f"[CHART DEBUG] {datetime.now()} load_trades called\n")
@@ -94,7 +94,7 @@ def generate_pnl_chart(log_dir: str, coins: List[str], output_path: str) -> bool
         # Take only final entries with real PnL!
         trade_map = {}  # {coin_market_slug: trade_data}
         
-        debug_file = "/root/4coins_live/logs/chart_debug.log"
+        debug_file = "logs/chart_debug.log"
         with open(debug_file, 'a') as f:
             f.write(f"[CHART DEBUG] Starting deduplication...\n")
         
@@ -134,7 +134,7 @@ def generate_pnl_chart(log_dir: str, coins: List[str], output_path: str) -> bool
         # Sort by close_time
         all_trades_timed.sort(key=lambda x: x['close_time'])
         
-        debug_file = "/root/4coins_live/logs/chart_debug.log"
+        debug_file = "logs/chart_debug.log"
         with open(debug_file, 'a') as f:
             f.write(f"[CHART DEBUG] Sorted {len(all_trades_timed)} trades\n")
         
@@ -285,7 +285,7 @@ def generate_pnl_chart(log_dir: str, coins: List[str], output_path: str) -> bool
         # Tight layout and save
         plt.tight_layout()
         
-        debug_file = "/root/4coins_live/logs/chart_debug.log"
+        debug_file = "logs/chart_debug.log"
         with open(debug_file, 'a') as f:
             f.write(f"[CHART DEBUG] About to save chart to: {output_path}\n")
         
@@ -299,7 +299,7 @@ def generate_pnl_chart(log_dir: str, coins: List[str], output_path: str) -> bool
         return True
         
     except Exception as e:
-        debug_file = "/root/4coins_live/logs/chart_debug.log"
+        debug_file = "logs/chart_debug.log"
         with open(debug_file, 'a') as f:
             f.write(f"[CHART ERROR] Exception: {str(e)}\n")
             import traceback

@@ -6,6 +6,7 @@ import json
 import threading
 from typing import Dict, List, Optional
 from pathlib import Path
+from db import save_trade, load_trades_for_strategy, save_market_metadata, load_all_market_metadata
 
 
 # Global dependencies (injected externally)
@@ -13,9 +14,6 @@ _order_executor = None
 _data_feed = None  # ✅ For access to position_tracker (REAL data!)
 _token_ids_cache = {}  # {market_slug: {'UP': token_id, 'DOWN': token_id}}
 _market_metadata_cache = {}  # {market_slug: {'condition_id': str, 'neg_risk': bool}}
-
-# Persistent storage for metadata (critical for redeem after restart!)
-_METADATA_FILE = Path("logs/market_metadata.json")
 
 
 def set_order_executor(executor):
@@ -33,63 +31,37 @@ def set_data_feed(data_feed):
 
 
 def save_market_metadata_to_disk():
-    """
-    💾 Save metadata to disk (CRITICAL for redeem after restart!)
-    
-    Metadata includes:
-    - token_ids (UP, DOWN) 
-    - condition_id (for redeem)
-    - neg_risk flag
-    
-    WITHOUT this redeem after restart is IMPOSSIBLE!
-    """
+    """Save metadata to PostgreSQL (Railway-compatible replacement)"""
     try:
-        _METADATA_FILE.parent.mkdir(exist_ok=True)
-        
-        # Merge token_ids and metadata into one dict
-        combined = {}
+        from db import save_market_metadata
         for market_slug in _token_ids_cache:
-            combined[market_slug] = {
-                'token_ids': _token_ids_cache[market_slug],
-                'metadata': _market_metadata_cache.get(market_slug, {})
-            }
-        
-        with open(_METADATA_FILE, 'w') as f:
-            json.dump(combined, f, indent=2)
-        
-        # print(f"[TRADER] 💾 Saved metadata for {len(combined)} markets to disk")
+            token_ids = _token_ids_cache[market_slug]
+            metadata = _market_metadata_cache.get(market_slug, {})
+            save_market_metadata(
+                market_slug=market_slug,
+                up_token_id=token_ids.get('UP', ''),
+                down_token_id=token_ids.get('DOWN', ''),
+                condition_id=metadata.get('condition_id', ''),
+                neg_risk=metadata.get('neg_risk', True)
+            )
     except Exception as e:
-        print(f"[TRADER] ⚠️ Failed to save metadata: {e}")
+        print(f"[TRADER] ⚠️ Failed to save metadata to DB: {e}")
 
 
 def load_market_metadata_from_disk():
-    """
-    📂 Load metadata from disk at startup
-    
-    This is critical for:
-    - Redeeming positions after restart
-    - EMERGENCY_SAVE positions (loaded from trades.jsonl)
-    """
+    """Load metadata from PostgreSQL (Railway-compatible replacement)"""
     global _token_ids_cache, _market_metadata_cache
-    
-    if not _METADATA_FILE.exists():
-        print("[TRADER] ℹ️ No metadata file found (first run or clean start)")
-        return
-    
     try:
-        with open(_METADATA_FILE, 'r') as f:
-            combined = json.load(f)
-        
-        # Restore caches
+        from db import load_all_market_metadata
+        combined = load_all_market_metadata()
         for market_slug, data in combined.items():
             if 'token_ids' in data:
                 _token_ids_cache[market_slug] = data['token_ids']
             if 'metadata' in data:
                 _market_metadata_cache[market_slug] = data['metadata']
-        
-        print(f"[TRADER] ✅ Loaded metadata for {len(combined)} markets from disk")
+        print(f"[TRADER] ✅ Loaded metadata for {len(combined)} markets from DB")
     except Exception as e:
-        print(f"[TRADER] ⚠️ Failed to load metadata: {e}")
+        print(f"[TRADER] ⚠️ Failed to load metadata from DB: {e}")
 
 
 def set_token_ids(market_slug: str, up_token_id: str, down_token_id: str, 
@@ -122,10 +94,11 @@ def get_market_metadata(market_slug: str) -> dict:
 class Trader:
     """Manage trading positions with detailed entry tracking"""
     
-    def __init__(self, capital: float, log_dir: str = "logs", config: dict = None):
+    def __init__(self, capital: float, log_dir: str = "logs", config: dict = None, strategy_name: str = ""):
         self.starting_capital = capital
         self.current_capital = capital
-        
+        self.strategy_name = strategy_name
+
         # Config for stop-loss checks
         self.config = config
         
@@ -145,77 +118,32 @@ class Trader:
         self.market_max_drawdown = {}  # {market_slug: max_dd_value}
         self.market_entries_count = {}  # {market_slug: count}
         
-        # Logging
-        self.log_dir = Path(log_dir)
-        self.trades_file = self.log_dir / "trades.jsonl"
-        self.session_file = self.log_dir / "session.json"
-        
         print(f"[TRADER] Initialized with ${capital:,.2f} capital")
         
         # Load previous trades to restore statistics
         self.load_previous_trades()
     
     def load_previous_trades(self):
-        """
-        Load previous trades from trades.jsonl to restore statistics
-        This allows bot to continue from where it left off after restart
-        """
-        if not self.trades_file.exists():
-            print(f"[TRADER] No previous trades file found (this is OK for first run)")
-            return
-        
+        """Load previous trades from PostgreSQL"""
         try:
-            loaded_count = 0
-            corrupted_lines = 0
-            
-            with open(self.trades_file, 'r') as f:
-                for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line:
-                        continue  # Skip empty lines
-                    
-                    try:
-                        trade = json.loads(line)
-                        
-                        # Validate trade has required fields
-                        if 'pnl' not in trade or 'market_slug' not in trade:
-                            print(f"[WARNING] Trade on line {line_num} missing required fields, skipping")
-                            corrupted_lines += 1
-                            continue
-                        
-                        self.closed_trades.append(trade)
-                        loaded_count += 1
-                        
-                    except json.JSONDecodeError as e:
-                        print(f"[WARNING] Corrupted JSON on line {line_num}: {e}")
-                        corrupted_lines += 1
-                        continue
-            
-            if loaded_count > 0:
-                # Recalculate current capital from loaded trades
+            from db import load_trades_for_strategy
+            trades = load_trades_for_strategy(self.strategy_name)
+            if not trades:
+                print(f"[TRADER] No previous trades found (first run)")
+                return
+            for trade in trades:
+                if 'pnl' in trade and 'market_slug' in trade:
+                    self.closed_trades.append(trade)
+            if self.closed_trades:
                 total_pnl = sum(t['pnl'] for t in self.closed_trades)
                 self.current_capital = self.starting_capital + total_pnl
-                
-                # Get stats
                 wins = sum(1 for t in self.closed_trades if t['pnl'] > 0)
-                win_rate = (wins / loaded_count * 100) if loaded_count > 0 else 0
-                
-                print(f"[TRADER] ✓ Loaded {loaded_count} previous trade(s)")
+                win_rate = (wins / len(self.closed_trades) * 100)
+                print(f"[TRADER] ✓ Loaded {len(self.closed_trades)} previous trades")
                 print(f"[TRADER]   Cumulative PnL: ${total_pnl:+,.2f}")
-                print(f"[TRADER]   Win Rate: {win_rate:.1f}% ({wins}/{loaded_count})")
-                print(f"[TRADER]   Current Capital: ${self.current_capital:,.2f}")
-                
-                if corrupted_lines > 0:
-                    print(f"[TRADER] ⚠ Skipped {corrupted_lines} corrupted line(s)")
-            else:
-                print(f"[TRADER] No valid trades found in file")
-                
+                print(f"[TRADER]   Win Rate: {win_rate:.1f}%")
         except Exception as e:
-            print(f"[TRADER] ⚠ Error loading previous trades: {e}")
-            print(f"[TRADER] Starting fresh with capital ${self.starting_capital:,.2f}")
-            # Reset to fresh state on error
-            self.closed_trades = []
-            self.current_capital = self.starting_capital
+            print(f"[TRADER] ⚠️ Failed to load trades from DB: {e}")
     
     def enter_position_contracts(self, market_slug: str, side: str, price: float, contracts: int,
                                  up_ask: float = None, down_ask: float = None,
@@ -907,17 +835,7 @@ class Trader:
         return snapshot
     
     def _log_exit_orderbook(self, snapshot: Dict):
-        """Write orderbook snapshot to log file for analysis"""
-        import os
-        
-        log_dir = f"logs/{self.strategy_name}"
-        os.makedirs(log_dir, exist_ok=True)
-        
-        log_file = f"{log_dir}/exit_orderbooks.jsonl"
-        
-        with open(log_file, 'a') as f:
-            f.write(json.dumps(snapshot) + '\n')
-        
+        """Log orderbook snapshot (print only, no file on Railway)"""
         # Print summary to console
         print(f"\n{'='*80}")
         print(f"[EXIT ORDERBOOK] {snapshot['coin'].upper()} - {snapshot['exit_reason']}")
@@ -1171,67 +1089,26 @@ class Trader:
         }
     
     def _log_trade(self, trade: Dict):
-        """
-        Log trade to file with maximum fault tolerance
-        
-        CRITICAL: This function MUST succeed or raise exception!
-        If it fails silently, we lose trade data!
-        """
+        """Save trade to PostgreSQL"""
         try:
-            # Ensure directory exists
-            self.trades_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Write to file with explicit flush
-            with open(self.trades_file, 'a') as f:
-                f.write(json.dumps(trade) + '\n')
-                f.flush()  # Force write to disk immediately
-                
-        except PermissionError as e:
-            print(f"[TRADER] ⚠️ PERMISSION ERROR logging trade: {e}")
-            print(f"[TRADER] ⚠️ Trade data: {trade}")
-            print(f"[TRADER] ⚠️ File: {self.trades_file}")
-            raise  # Re-raise to prevent position deletion
-            
-        except OSError as e:
-            print(f"[TRADER] ⚠️ DISK ERROR logging trade: {e}")
-            print(f"[TRADER] ⚠️ Trade data: {trade}")
-            print(f"[TRADER] ⚠️ Check disk space: df -h")
-            raise  # Re-raise to prevent position deletion
-            
+            from db import save_trade
+            save_trade(trade, strategy=self.strategy_name, coin=getattr(self, 'coin', ''))
         except Exception as e:
-            print(f"[TRADER] ⚠️ UNKNOWN ERROR logging trade: {e}")
-            print(f"[TRADER] ⚠️ Trade data: {trade}")
-            import traceback
-            traceback.print_exc()
-            raise  # Re-raise to prevent position deletion
+            print(f"[TRADER] ⚠️ Failed to save trade to DB: {e}")
+            raise
     
     def save_session(self):
-        """Save current session state"""
-        try:
-            session = {
-                'starting_capital': self.starting_capital,
-                'current_capital': self.current_capital,
-                'total_pnl': self.current_capital - self.starting_capital,
-                'roi_pct': ((self.current_capital / self.starting_capital) - 1) * 100,
-                'open_positions': len(self.positions),
-                'closed_trades': len(self.closed_trades),
-                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
-            }
-            
-            with open(self.session_file, 'w') as f:
-                json.dump(session, f, indent=2)
-                
-        except Exception as e:
-            print(f"[TRADER] Error saving session: {e}")
+        """Session state is derived from DB trades - no-op"""
+        pass
     
-    def log_entry_detailed(self, market_slug: str, side: str, contracts: int, 
+    def log_entry_detailed(self, market_slug: str, side: str, contracts: int,
                            price: float, up_ask: float, down_ask: float,
-                           winner_ratio: float, is_recovery: bool, 
+                           winner_ratio: float, is_recovery: bool,
                            entry_reason: str, seconds_till_end: int,
                            time_from_start: int):
         """
         Log detailed entry for backtesting analysis
-        
+
         Args:
             market_slug: Full market slug
             side: 'UP' or 'DOWN'
@@ -1245,18 +1122,12 @@ class Trader:
             seconds_till_end: Seconds until market end
             time_from_start: Seconds from market start
         """
-        import os
-        
-        # Create detailed logs directory
-        detailed_dir = str(self.log_dir).replace('/logs/', '/logs_detailed/')
-        Path(detailed_dir).mkdir(parents=True, exist_ok=True)
-        
         # Get position data
         if market_slug not in self.positions:
             return
-        
+
         pos = self.positions[market_slug]
-        
+
         # Calculate current metrics
         up_contracts = pos['UP']['total_shares']
         down_contracts = pos['DOWN']['total_shares']
@@ -1265,47 +1136,47 @@ class Trader:
         total_invested = up_invested + down_invested
         total_contracts = up_contracts + down_contracts
         entries_count = len(pos['all_entries'])
-        
+
         # Calculate CORRECT unrealized PnL based on current market prices
         current_value = (up_contracts * up_ask) + (down_contracts * down_ask)
         unrealized_pnl = current_value - total_invested
         unrealized_pnl_pct = (unrealized_pnl / total_invested * 100) if total_invested > 0 else 0
-        
+
         # Update max drawdown with current unrealized PnL BEFORE reading it
         self.update_market_drawdown(market_slug, unrealized_pnl)
-        
+
         # Calculate PnL scenarios if market resolves
         if_up_wins = (up_contracts * 1.0) - total_invested
         if_down_wins = (down_contracts * 1.0) - total_invested
-        
+
         # Average prices
         avg_up_price = (up_invested / up_contracts) if up_contracts > 0 else 0
         avg_down_price = (down_invested / down_contracts) if down_contracts > 0 else 0
-        
+
         # Get max drawdown for this market (after updating it above)
         max_dd = self.market_max_drawdown.get(market_slug, 0.0)
         max_dd_pct = (max_dd / total_invested * 100) if total_invested > 0 else 0
-        
+
         # Build entry data
         entry_data = {
             "timestamp": int(time.time()),
             "market_slug": market_slug,
             "seconds_till_end": seconds_till_end,
             "time_from_start": time_from_start,
-            
+
             "market_prices": {
                 "up_ask": round(up_ask, 3),
                 "down_ask": round(down_ask, 3),
                 "confidence": round(abs(down_ask - up_ask), 3)
             },
-            
+
             "entry": {
                 "side": side,
                 "contracts": contracts,
                 "price": round(price, 3),
                 "cost": round(contracts * price, 2)
             },
-            
+
             "position_after": {
                 "up_contracts": int(up_contracts),
                 "down_contracts": int(down_contracts),
@@ -1315,7 +1186,7 @@ class Trader:
                 "total_contracts": int(total_contracts),
                 "entries_count": entries_count
             },
-            
+
             "pnl_metrics": {
                 "unrealized_pnl": round(unrealized_pnl, 2),
                 "unrealized_pnl_pct": round(unrealized_pnl_pct, 2),
@@ -1326,20 +1197,18 @@ class Trader:
                 "avg_up_price": round(avg_up_price, 3),
                 "avg_down_price": round(avg_down_price, 3)
             },
-            
+
             "strategy_state": {
                 "winner_ratio": round(winner_ratio, 3),
                 "is_recovery": is_recovery,
                 "entry_reason": entry_reason
             }
         }
-        
-        # Filename based on market slug
-        filename = f"{market_slug}_entries.jsonl"
-        filepath = os.path.join(detailed_dir, filename)
-        
-        # Append entry
-        with open(filepath, 'a') as f:
-            f.write(json.dumps(entry_data) + '\n')
+
+        try:
+            from db import save_trade
+            save_trade(entry_data, strategy=self.strategy_name, coin=getattr(self, 'coin', ''))
+        except Exception as e:
+            print(f"[TRADER] ⚠️ Failed to log detailed entry: {e}")
 
 

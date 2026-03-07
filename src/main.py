@@ -186,48 +186,20 @@ def validate_prices(up_ask: float, down_ask: float, up_timestamp: float, down_ti
 
 def run_manual_redeem():
     """Callback for manual redeem (M key)"""
-    print("\n" + "="*80)
-    print(" MANUAL REDEEM TRIGGERED ".center(80, "="))
-    print("="*80 + "\n")
-    
-    try:
-        # Import the redeemall module directly
-        import sys
-        sys.path.insert(0, "/root/clip")
-        
-        # Load environment from 4coins_live
-        from dotenv import load_dotenv
-        from pathlib import Path
-        env_path = Path("/root/4coins_live/.env")
-        load_dotenv(env_path, override=True)
-        
-        # Import and run redeemall with auto-confirm
-        import redeemall
-        print("[REDEEM] Starting automatic redemption...")
-        print("[REDEEM] Using wallet from: /root/4coins_live/.env")
-        print()
-        
-        redeemall.main(auto_confirm=True)
-        
-        print("\n[REDEEM] Completed!")
-            
-    except Exception as e:
-        print(f"\n[REDEEM] Error: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    print("\n" + "="*80)
-    print(" Returning to trading... ".center(80))
-    print("="*80 + "\n")
-    
-    # Give user 2 seconds to see the result
-    time.sleep(2)
+    print("[REDEEM] Manual keyboard redeem not supported on Railway")
+    print("[REDEEM] Use /r command in Telegram instead")
 
 
 def main():
     """Main trading loop"""
     global stop_flag, data_feed, wallet_balance, keyboard_listener
-    
+
+    from db import init_db
+    init_db()
+
+    from pathlib import Path
+    Path("logs").mkdir(exist_ok=True)
+
     # Track session start time for uptime
     session_start_time = time.time()
     
@@ -448,12 +420,12 @@ def main():
             
             # Generate chart path (unique name to avoid conflicts)
             import uuid
-            chart_path = f"/root/4coins_live/logs/pnl_chart_on_demand_{uuid.uuid4().hex[:8]}.png"
+            chart_path = f"logs/pnl_chart_on_demand_{uuid.uuid4().hex[:8]}.png"
             
             print(f"[TELEGRAM CMD] 📊 Chart request received")
             print(f"[TELEGRAM CMD] Chart path: {chart_path}")
             print(f"[TELEGRAM CMD] COINS list: {COINS}")
-            print(f"[TELEGRAM CMD] Log dir: /root/4coins_live/logs")
+            print(f"[TELEGRAM CMD] Log dir: logs")
             
             # Import chart generator
             from pnl_chart_generator import generate_pnl_chart
@@ -462,7 +434,7 @@ def main():
             # NOTE: We don't check total_completed_markets because it resets after restart
             # Instead, generate_pnl_chart will check actual files and return False if no data
             print(f"[TELEGRAM CMD] Calling generate_pnl_chart()...")
-            result = generate_pnl_chart('/root/4coins_live/logs', COINS, chart_path)
+            result = generate_pnl_chart('logs', COINS, chart_path)
             print(f"[TELEGRAM CMD] generate_pnl_chart() returned: {result}")
             
             if not result:
@@ -484,7 +456,7 @@ def main():
                 # This works correctly after bot restart
                 actual_markets_count = 0
                 for coin in COINS:
-                    trades_file = Path(f"/root/4coins_live/logs/late_v3_{coin}/trades.jsonl")
+                    trades_file = Path(f"logs/late_v3_{coin}/trades.jsonl")
                     if trades_file.exists():
                         try:
                             with open(trades_file, 'r') as f:
@@ -1254,9 +1226,9 @@ def main():
                                 
                                 if total_completed_markets - last_chart_at >= CHART_INTERVAL:
                                     print(f"[CHART] {total_completed_markets} markets completed, generating PnL chart...")
-                                    chart_path = f"/root/4coins_live/logs/pnl_chart_{total_completed_markets}.png"
+                                    chart_path = f"logs/pnl_chart_{total_completed_markets}.png"
                                     from pnl_chart_generator import generate_pnl_chart
-                                    if generate_pnl_chart('/root/4coins_live/logs', COINS, chart_path):
+                                    if generate_pnl_chart('logs', COINS, chart_path):
                                         caption = f"<b>📊 PnL Chart - {total_completed_markets} Markets Completed</b>"
                                         if notifier.send_photo(chart_path, caption):
                                             print(f"[CHART] ✓ Sent to Telegram successfully")
@@ -1576,12 +1548,12 @@ def main():
                                         if total_completed_markets - last_chart_at >= CHART_INTERVAL:
                                             print(f"[CHART] {total_completed_markets} markets completed, generating PnL chart...")
                                             
-                                            chart_path = f"/root/4coins_live/logs/pnl_chart_{total_completed_markets}.png"
+                                            chart_path = f"logs/pnl_chart_{total_completed_markets}.png"
                                             
                                             # Import chart generator
                                             from pnl_chart_generator import generate_pnl_chart
                                             
-                                            if generate_pnl_chart('/root/4coins_live/logs', COINS, chart_path):
+                                            if generate_pnl_chart('logs', COINS, chart_path):
                                                 # Send to Telegram
                                                 caption = f"<b>📊 PnL Chart - {total_completed_markets} Markets Completed</b>"
                                                 if notifier.send_photo(chart_path, caption):
@@ -1672,12 +1644,12 @@ def main():
                                         if total_completed_markets - last_chart_at >= CHART_INTERVAL:
                                             print(f"[CHART] {total_completed_markets} markets completed, generating PnL chart...")
                                             
-                                            chart_path = f"/root/4coins_live/logs/pnl_chart_{total_completed_markets}.png"
+                                            chart_path = f"logs/pnl_chart_{total_completed_markets}.png"
                                             
                                             # Import chart generator
                                             from pnl_chart_generator import generate_pnl_chart
                                             
-                                            if generate_pnl_chart('/root/4coins_live/logs', COINS, chart_path):
+                                            if generate_pnl_chart('logs', COINS, chart_path):
                                                 # Send to Telegram
                                                 caption = f"<b>📊 PnL Chart - {total_completed_markets} Markets Completed</b>"
                                                 if notifier.send_photo(chart_path, caption):
@@ -1805,10 +1777,14 @@ def main():
     print()
     
     # Initialize keyboard listener for manual commands
-    keyboard_listener = KeyboardListener()
-    keyboard_listener.register_callback('m', run_manual_redeem, "Manual redeem all positions")
-    keyboard_listener.start()
-    print("[KEYBOARD] 🎹 Listener active - Press [M] to manually redeem all positions")
+    try:
+        keyboard_listener = KeyboardListener()
+        keyboard_listener.register_callback('m', run_manual_redeem, "Manual redeem")
+        keyboard_listener.start()
+        print("[KEYBOARD] Listener active")
+    except Exception as e:
+        print(f"[KEYBOARD] Not available: {e}")
+        keyboard_listener = None
     print()
     
     loop_counter = 0
