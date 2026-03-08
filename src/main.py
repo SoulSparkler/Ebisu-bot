@@ -104,8 +104,12 @@ signal.signal(signal.SIGINT, signal_handler)
 def load_config(config_path: str = None) -> dict:
     """Load configuration"""
     if config_path is None:
-        # Default to ../config/config.json relative to this file
-        config_path = Path(__file__).parent.parent / "config" / "config.json"
+        config_dir = Path(__file__).parent.parent / "config"
+        config_path = config_dir / "config.json"
+        # Fall back to config.example.json (Railway deploys without config.json)
+        if not config_path.exists():
+            config_path = config_dir / "config.example.json"
+            print(f"[CONFIG] config.json not found, using {config_path}")
     with open(config_path, 'r') as f:
         return json.load(f)
 
@@ -194,11 +198,16 @@ def main():
     """Main trading loop"""
     global stop_flag, data_feed, wallet_balance, keyboard_listener
 
-    from db import init_db
-    init_db()
-
     from pathlib import Path
     Path("logs").mkdir(exist_ok=True)
+
+    from db import init_db
+    try:
+        init_db()
+    except Exception as e:
+        print(f"[DB] ⚠️ Database initialization failed: {e}")
+        print(f"[DB] ⚠️ Bot will continue but trades won't be persisted!")
+        print(f"[DB] ⚠️ Make sure DATABASE_URL is set in Railway variables")
 
     # Track session start time for uptime
     session_start_time = time.time()
