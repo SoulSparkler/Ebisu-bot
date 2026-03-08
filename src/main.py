@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from data_feed import DataFeed
 from strategy import LateEntryStrategy
 from multi_trader import MultiTrader
+from paper_tracker import PaperTracker
 from dashboard_multi_ab import DashboardMultiAB
 from polymarket_api import get_market_outcome
 from telegram_notifier import get_notifier
@@ -376,6 +377,14 @@ def main():
             strategies[strategy_name] = LateEntryStrategy(config)
             print(f"         ✓ {strategy_name:30s} (Last 4 min | Time-Based Sizing)")
     
+    # Initialize paper trackers — one per coin, track ML/signal accuracy vs outcomes
+    paper_trackers = {coin: PaperTracker() for coin in COINS}
+    paper_predictions_recorded = {coin: set() for coin in COINS}  # {coin: {market_slug}}
+    print(f"[SYSTEM] ✓ Paper trackers initialized for {len(COINS)} coins")
+
+    # Pair-cost floor measurement: {coin: {market_slug: {stats}}}
+    pair_cost_stats = {coin: {} for coin in COINS}
+
     # Initialize multi-trader (unified wallet - no capital distribution)
     global multi_trader_instance
     print("\n[SYSTEM] Initializing multi-trader...")
@@ -1435,9 +1444,32 @@ def main():
                     continue
                 
                 try:
+                    # ─────────────────────────────────────────────────────
+                    # PAIR-COST FLOOR MEASUREMENT (every tick, every market)
+                    # ─────────────────────────────────────────────────────
+                    if up_ask > 0 and down_ask > 0:
+                        current_pair = up_ask + down_ask
+                        if market_slug not in pair_cost_stats[coin]:
+                            pair_cost_stats[coin][market_slug] = {
+                                'min_pair_cost_seen': 999.0,
+                                'min_pair_cost_time': 0.0,
+                                'pair_cost_samples': 0,
+                                'pair_cost_below_99': 0,
+                                'pair_cost_below_98': 0,
+                            }
+                        pcs = pair_cost_stats[coin][market_slug]
+                        pcs['pair_cost_samples'] += 1
+                        if current_pair < pcs['min_pair_cost_seen']:
+                            pcs['min_pair_cost_seen'] = current_pair
+                            pcs['min_pair_cost_time'] = time.time()
+                        if current_pair < 0.99:
+                            pcs['pair_cost_below_99'] += 1
+                        if current_pair < 0.98:
+                            pcs['pair_cost_below_98'] += 1
+
                     # Get current position stats (thread-safe via multi_trader locks)
                     position_stats = multi_trader.get_market_stats(strategy_name, market_slug, up_ask, down_ask)
-                    
+
                     # ═══════════════════════════════════════════════════════
                     # PART 1: EXIT CHECKS (if we have a position)
                     # ═══════════════════════════════════════════════════════
@@ -1693,7 +1725,21 @@ def main():
                     
                     # Generate signal with current market state
                     signal = strategy.should_enter(market_state, position_stats)
-                    
+
+                    # Paper tracker: record first prediction per window (regardless of entry)
+                    if market_slug not in paper_predictions_recorded[coin]:
+                        pair_cost_ok = strategy._pair_cost_ok(up_ask, down_ask)
+                        predicted_side = strategy._should_enter(market_state, position_stats) or "NONE"
+                        paper_trackers[coin].record_prediction(
+                            window_id=market_slug,
+                            asset=coin.upper(),
+                            predicted_side=predicted_side,
+                            up_ask=up_ask,
+                            down_ask=down_ask,
+                            pair_cost_ok=pair_cost_ok,
+                        )
+                        paper_predictions_recorded[coin].add(market_slug)
+
                     if signal:
                         # Extract side/contracts - handle LateEntryStrategy format
                         side = None
@@ -1882,6 +1928,28 @@ def main():
                             #         'next_retry': time.time() + first_delay
                             #     }
                         
+                        # Pair-cost analysis: log summary for closed market
+                        if prev_market in pair_cost_stats.get(coin, {}):
+                            pcs = pair_cost_stats[coin].pop(prev_market)
+                            samples = max(pcs['pair_cost_samples'], 1)
+                            print(
+                                f"[PAIR_COST] {coin.upper()} {prev_market} | "
+                                f"min={pcs['min_pair_cost_seen']:.4f} "
+                                f"samples={pcs['pair_cost_samples']} "
+                                f"pct_below_99={pcs['pair_cost_below_99']/samples*100:.1f}% "
+                                f"pct_below_98={pcs['pair_cost_below_98']/samples*100:.1f}%"
+                            )
+
+                        # Paper tracker: record outcome when market closes
+                        if prev_market in paper_predictions_recorded[coin]:
+                            try:
+                                api_result = get_market_outcome(prev_market)
+                                if api_result and api_result.get("winner"):
+                                    paper_trackers[coin].record_outcome(api_result["winner"])
+                                    paper_predictions_recorded[coin].discard(prev_market)
+                            except Exception as _pt_err:
+                                print(f"[PAPER] Could not record outcome for {prev_market}: {_pt_err}")
+
                         # Remove from tracking
                         del market_start_prices[coin][prev_market]
                 
