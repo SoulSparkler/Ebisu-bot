@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Late Entry V3 Trading System - Multi-Market (BTC + ETH + SOL + XRP)
-1 Strategy × 4 Markets = 4 Parallel Traders
+Late Entry V3 Trading System - Multi-Market (SOL + XRP)
+1 Strategy × 2 Markets = 2 Parallel Traders
 Unified Wallet - Single Balance Across All Markets
 """
 import json
@@ -31,7 +31,9 @@ import trader as trader_module
 
 # Global configuration constants
 STRATEGY_BASES = ['late_v3']
-COINS = ['btc', 'eth', 'sol', 'xrp']
+# BTC/ETH disabled — pair costs rarely dip below $0.99 (0.1% and 1.2% of samples)
+# XRP: 2.3% of samples below $0.99, SOL: 1.5%
+COINS = ['sol', 'xrp']
 
 # Global stop flag
 stop_flag = False
@@ -214,8 +216,8 @@ def main():
     session_start_time = time.time()
     
     print("=" * 115)
-    print("  LATE ENTRY V3: BTC + ETH + SOL + XRP".center(115))
-    print("  Last 4 minutes | Time-Based Sizing | HYBRID STOP-LOSS | Flip-Stop".center(115))
+    print("  LATE ENTRY V3: SOL + XRP".center(115))
+    print("  Full 15-minute window | Time-Based Sizing | HYBRID STOP-LOSS | Flip-Stop".center(115))
     print("  Unified Wallet | Real-Time Trading | FAK Orders".center(115))
     print("=" * 115)
     print()
@@ -366,7 +368,7 @@ def main():
     time.sleep(5)  # Let data stabilize
     
     # Initialize 2 strategies (1 base × 2 coins) using global constants
-    print(f"[SYSTEM] Initializing 2 parallel strategies...")
+    print(f"[SYSTEM] Initializing {len(COINS)} parallel strategies...")
     strategies = {}
     strategy_names = []
     
@@ -375,7 +377,7 @@ def main():
             strategy_name = f"{base_name}_{coin}"
             strategy_names.append(strategy_name)
             strategies[strategy_name] = LateEntryStrategy(config)
-            print(f"         ✓ {strategy_name:30s} (Last 4 min | Time-Based Sizing)")
+            print(f"         ✓ {strategy_name:30s} (Full window | Time-Based Sizing)")
     
     # Initialize paper trackers — one per coin, track ML/signal accuracy vs outcomes
     paper_trackers = {coin: PaperTracker() for coin in COINS}
@@ -1453,6 +1455,7 @@ def main():
                             pair_cost_stats[coin][market_slug] = {
                                 'min_pair_cost_seen': 999.0,
                                 'min_pair_cost_time': 0.0,
+                                'min_pair_cost_stc': 0,
                                 'pair_cost_samples': 0,
                                 'pair_cost_below_99': 0,
                                 'pair_cost_below_98': 0,
@@ -1462,6 +1465,7 @@ def main():
                         if current_pair < pcs['min_pair_cost_seen']:
                             pcs['min_pair_cost_seen'] = current_pair
                             pcs['min_pair_cost_time'] = time.time()
+                            pcs['min_pair_cost_stc'] = market_state.get('seconds_till_end', 0)
                         if current_pair < 0.99:
                             pcs['pair_cost_below_99'] += 1
                         if current_pair < 0.98:
@@ -1935,6 +1939,7 @@ def main():
                             print(
                                 f"[PAIR_COST] {coin.upper()} {prev_market} | "
                                 f"min={pcs['min_pair_cost_seen']:.4f} "
+                                f"stc={pcs['min_pair_cost_stc']}s "
                                 f"samples={pcs['pair_cost_samples']} "
                                 f"pct_below_99={pcs['pair_cost_below_99']/samples*100:.1f}% "
                                 f"pct_below_98={pcs['pair_cost_below_98']/samples*100:.1f}%"
@@ -2011,10 +2016,10 @@ def main():
                 #         print(f"[REDEEM] Failed to submit {coin}/{prev_market}: {e}")
                 
                 # ═══════════════════════════════════════════════════════
-                # BALANCE CHECK: 60 seconds before BTC market end
-                # (BTC market ends every 15 minutes - good timing for balance refresh)
+                # BALANCE CHECK: 60 seconds before SOL market end
+                # (markets end every 15 minutes - good timing for balance refresh)
                 # ═══════════════════════════════════════════════════════
-                if coin == 'btc':
+                if coin == 'sol':
                     seconds_till_end = market_state.get('seconds_till_end', 0)
                     
                     # Check balance 60 seconds before market end
@@ -2051,8 +2056,8 @@ def main():
                 # Check if this market is active
                 current_market_status = market_start_prices[coin].get(market_slug, -999)
                 
-                # If market was skipped (-1) but now in entry window (<= 240s) - ALLOW TRADING!
-                if current_market_status == -1 and market_state['seconds_till_end'] <= 240:
+                # If market was skipped (-1) but now in entry window (<= 900s) - ALLOW TRADING!
+                if current_market_status == -1 and market_state['seconds_till_end'] <= 900:
                     market_start_prices[coin][market_slug] = 0  # Activate market
                     print(f"\n[{coin.upper()}] ✅ Market {market_slug} NOW ACTIVE (entry window)")
                 elif current_market_status in [-1, -2, -999]:

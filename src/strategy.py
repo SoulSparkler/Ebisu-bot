@@ -1,5 +1,5 @@
 """
-Late Entry V3 Strategy - Last 4 minutes entry with time-based sizing
+Late Entry V3 Strategy - Full 15-minute window entry with time-based sizing
 """
 import time
 import logging
@@ -12,14 +12,14 @@ PAIR_COST_CEILING = 0.99  # Must be < 1.00 to have any margin after fees
 
 
 class LateEntryStrategy:
-    """Late Entry V3 - enter in last 4 minutes, buy the favorite"""
-    
+    """Late Entry V3 - enter across full 15-minute window, buy the favorite"""
+
     def __init__(self, config: Dict):
         # Read ALL params from config (NO HARDCODED VALUES!)
         strategy_cfg = config.get('strategy', {})
-        
+
         # Late entry params
-        self.entry_window = strategy_cfg.get('entry_window_sec', 240)
+        self.entry_window = strategy_cfg.get('entry_window_sec', 900)
         self.entry_freq = strategy_cfg.get('entry_frequency_sec', 7)
         self.min_confidence = strategy_cfg.get('min_confidence', 0.30)
         self.max_spread = strategy_cfg.get('max_spread', 1.05)
@@ -149,8 +149,8 @@ class LateEntryStrategy:
         up_ask = state['up_ask']
         down_ask = state['down_ask']
         
-        # TIME: last 4 min only
-        if time_left > self.entry_window or time_left <= 0:
+        # TIME: full window, but kill switch in final 30 s
+        if time_left > self.entry_window or time_left < 30:
             return None
         
         # FREQUENCY

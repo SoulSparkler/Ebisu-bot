@@ -7,25 +7,25 @@
   },
   "trading": {
     "btc": {
-      "enabled": true,
-      "reason": ""
+      "enabled": false,
+      "reason": "Disabled — pair costs rarely dip below $0.99 (0.1% of samples)"
     },
     "eth": {
-      "enabled": true,
-      "reason": ""
+      "enabled": false,
+      "reason": "Disabled — pair costs rarely dip below $0.99 (1.2% of samples)"
     },
     "sol": {
       "enabled": true,
-      "reason": ""
+      "reason": "1.5% of samples below $0.99"
     },
     "xrp": {
-      "enabled": false,
-      "reason": "Disabled by default - less liquid market"
+      "enabled": true,
+      "reason": "2.3% of samples below $0.99"
     }
   },
   "strategy": {
     "name": "late_entry_v3",
-    "entry_window_sec": 240,
+    "entry_window_sec": 900,
     "entry_frequency_sec": 7,
     "min_confidence": 0.30,
     "max_spread": 1.05,
