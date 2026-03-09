@@ -49,7 +49,8 @@ class DataFeed:
                 'tokens': {},
                 'seconds_till_end': 900,
                 'market_end_time': int(time.time()) + 900,
-                'market_start_price': 0.0
+                'market_start_price': 0.0,
+                'last_message_time': 0.0,  # Updated on every WS message (any token)
             },
             'eth': {
                 'slug': '',
@@ -68,7 +69,8 @@ class DataFeed:
                 'tokens': {},
                 'seconds_till_end': 900,
                 'market_end_time': int(time.time()) + 900,
-                'market_start_price': 0.0
+                'market_start_price': 0.0,
+                'last_message_time': 0.0,
             },
             'sol': {
                 'slug': '',
@@ -87,7 +89,8 @@ class DataFeed:
                 'tokens': {},
                 'seconds_till_end': 900,
                 'market_end_time': int(time.time()) + 900,
-                'market_start_price': 0.0  # Not used for SOL (no price feed)
+                'market_start_price': 0.0,  # Not used for SOL (no price feed)
+                'last_message_time': 0.0,
             },
             'xrp': {
                 'slug': '',
@@ -106,7 +109,8 @@ class DataFeed:
                 'tokens': {},
                 'seconds_till_end': 900,
                 'market_end_time': int(time.time()) + 900,
-                'market_start_price': 0.0  # Not used for XRP (no price feed)
+                'market_start_price': 0.0,  # Not used for XRP (no price feed)
+                'last_message_time': 0.0,
             }
         }
         
@@ -354,10 +358,14 @@ class DataFeed:
         """Parse Polymarket orderbook message for specified coin"""
         try:
             data = json.loads(message)
-            
+
             if not isinstance(data, dict):
                 return
-            
+
+            # Stamp connection liveness on every valid message (any event type)
+            with self.locks[coin]:
+                self.markets[coin]['last_message_time'] = time.time()
+
             # Only process "book" events (full orderbook snapshots)
             event_type = data.get("event_type", "unknown")
             if event_type != "book":
@@ -485,6 +493,7 @@ class DataFeed:
                             'down_ask_timestamp': self.markets[coin]['down_ask_timestamp'],
                             'up_bid_timestamp': self.markets[coin]['up_bid_timestamp'],
                             'down_bid_timestamp': self.markets[coin]['down_bid_timestamp'],
+                            'last_message_time': self.markets[coin]['last_message_time'],
                             'price': market_price,
                             'market_start_price': market_start_price,
                             'seconds_till_end': seconds_till_end,

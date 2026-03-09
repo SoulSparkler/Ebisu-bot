@@ -160,34 +160,43 @@ def _get_portfolio_stats(multi_trader, markets_skipped, session_start_time):
 wallet_balance = 0.0  # Will be set in main() after wallet check
 
 
-def validate_prices(up_ask: float, down_ask: float, up_timestamp: float, down_timestamp: float, 
-                   coin: str = '', threshold_sec: float = 2.0) -> tuple:
+def validate_prices(up_ask: float, down_ask: float, up_timestamp: float, down_timestamp: float,
+                   coin: str = '', threshold_sec: float = 2.0,
+                   last_message_time: float = 0.0) -> tuple:
     """
-    Validate that prices are synchronized and fresh
-    
+    Validate that prices are fresh and the WebSocket connection is alive.
+
+    Key insight: UP and DOWN share one WebSocket per coin. The DOWN orderbook
+    can go quiet for many seconds in thin markets — that's normal, not stale.
+    We use `last_message_time` (updated on every WS message) as the liveness
+    signal. A quiet DOWN book is only stale if the *connection* itself went dead.
+
     Returns: (is_valid: bool, reason: str)
     """
     now = time.time()
-    
-    # Check 1: Freshness (prices updated recently)
-    up_age = now - up_timestamp if up_timestamp > 0 else 999
-    down_age = now - down_timestamp if down_timestamp > 0 else 999
-    
-    if up_age > threshold_sec:
-        return False, f"UP_STALE_{up_age:.1f}s"
-    if down_age > threshold_sec:
-        return False, f"DOWN_STALE_{down_age:.1f}s"
-    
-    # Check 2: Timestamp sync (both updated in same time window)
-    if abs(up_timestamp - down_timestamp) > threshold_sec:
-        return False, f"DESYNC_{abs(up_timestamp - down_timestamp):.1f}s"
-    
+
+    # Check 1: WebSocket connection liveness
+    # If we've received any message recently, the connection is alive and prices are valid.
+    connection_age = now - last_message_time if last_message_time > 0 else 999
+    if connection_age > threshold_sec:
+        # Connection appears dead — fall back to per-token timestamps
+        up_age = now - up_timestamp if up_timestamp > 0 else 999
+        down_age = now - down_timestamp if down_timestamp > 0 else 999
+        if up_age > threshold_sec:
+            return False, f"UP_STALE_{up_age:.1f}s"
+        if down_age > threshold_sec:
+            return False, f"DOWN_STALE_{down_age:.1f}s"
+
+    # Check 2: Both prices must have been set at least once (not still at 0-init)
+    if up_timestamp == 0 or down_timestamp == 0:
+        return False, "PRICES_NOT_INITIALIZED"
+
     # Check 3: Sum validation (UP + DOWN ≈ 1.0)
     # Allow wider range (0.95-1.15) to account for spread and rapid price changes
     price_sum = up_ask + down_ask
     if price_sum < 0.95 or price_sum > 1.15:
         return False, f"INVALID_SUM_{price_sum:.3f}"
-    
+
     return True, "OK"
 
 
@@ -1484,9 +1493,13 @@ def main():
                         # ─────────────────────────────────────────────────
                         up_ask_ts = market_state.get('up_ask_timestamp', 0)
                         down_ask_ts = market_state.get('down_ask_timestamp', 0)
-                        
-                        is_valid, reason = validate_prices(up_ask, down_ask, up_ask_ts, down_ask_ts, coin)
-                        
+                        last_msg_ts = market_state.get('last_message_time', 0)
+
+                        is_valid, reason = validate_prices(
+                            up_ask, down_ask, up_ask_ts, down_ask_ts, coin,
+                            last_message_time=last_msg_ts,
+                        )
+
                         if not is_valid:
                             # Prices invalid - skip ALL exit checks
                             print(f"[PRICE] ⚠️ {coin.upper()} prices invalid: {reason}, skipping exit checks")
@@ -2110,8 +2123,12 @@ def main():
                         # Validate price freshness before exit checks
                         up_ask_ts = market_state.get('up_ask_timestamp', 0)
                         down_ask_ts = market_state.get('down_ask_timestamp', 0)
-                        
-                        is_valid, reason = validate_prices(up_ask, down_ask, up_ask_ts, down_ask_ts, coin_name)
+                        last_msg_ts = market_state.get('last_message_time', 0)
+
+                        is_valid, reason = validate_prices(
+                            up_ask, down_ask, up_ask_ts, down_ask_ts, coin_name,
+                            last_message_time=last_msg_ts,
+                        )
                         if not is_valid:
                             # Skip stop-loss/flip-stop if prices invalid
                             return

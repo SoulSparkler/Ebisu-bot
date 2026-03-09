@@ -162,26 +162,42 @@ class LateEntryStrategy:
         if not self._pair_cost_ok(up_ask, down_ask):
             return None  # No maker orders when pair cost is too high
 
+        # Pair cost passed — log every subsequent block so we can see why dips are missed
+        pair_cost = up_ask + down_ask
+
         # CONFIDENCE (min spread between sides indicates market has picked a side)
         confidence = abs(up_ask - down_ask)
         if confidence < self.min_confidence:
+            logger.warning(
+                "SKIP_CONFIDENCE pair=%.4f conf=%.4f < %.2f stc=%ds up=%.3f dn=%.3f %s",
+                pair_cost, confidence, self.min_confidence, time_left,
+                up_ask, down_ask, market,
+            )
             return None
 
         # Determine entry side via pair-cost-driven logic
         side = self._should_enter(state, position)
         if side is None:
-            return None
+            return None  # REJECT_FILL already warns on effective-avg failure
 
         fav_price = up_ask if side == 'UP' else down_ask
 
         # PRICE MAX
         if fav_price > self.price_max:
+            logger.warning(
+                "SKIP_PRICE_MAX pair=%.4f fav=%.3f > %.2f side=%s stc=%ds %s",
+                pair_cost, fav_price, self.price_max, side, time_left, market,
+            )
             return None
 
         # INVESTMENT LIMIT
         if position:
             total_cost = position.get('total_cost', 0)
             if total_cost >= self.max_investment:
+                logger.warning(
+                    "SKIP_INVEST_LIMIT pair=%.4f invested=%.2f >= %.2f stc=%ds %s",
+                    pair_cost, total_cost, self.max_investment, time_left, market,
+                )
                 return None
 
         # RISK CHECKS - stop-loss removed, only flip-stop via main.py
