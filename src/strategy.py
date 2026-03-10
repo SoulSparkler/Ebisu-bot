@@ -183,6 +183,40 @@ class LateEntryStrategy:
         # Pair cost passed — log every subsequent block so we can see why dips are missed
         pair_cost = up_ask + down_ask
 
+        # ─────────────────────────────────────────────────────────
+        # ARBITRAGE MODE: pair_cost < 0.99 AND one side < 0.45
+        # Buy BOTH sides simultaneously — guaranteed $1.00 at resolution
+        # ─────────────────────────────────────────────────────────
+        ARB_SIDE_THRESHOLD = 0.45
+        if min(up_ask, down_ask) < ARB_SIDE_THRESHOLD:
+            size = self.size_above_180 if time_left > 180 else (self.size_above_120 if time_left > 120 else self.size_below_120)
+            self.last_entry[market] = now
+            logger.info(
+                "[ARB_ENTRY] pair_cost=%.4f up=%.3f dn=%.3f stc=%ds %s",
+                pair_cost, up_ask, down_ask, time_left, market,
+            )
+            return {
+                'favored': {
+                    'side': 'UP',
+                    'price': up_ask,
+                    'contracts': size,
+                },
+                'hedge': {
+                    'side': 'DOWN',
+                    'price': down_ask,
+                    'contracts': size,
+                },
+                'confidence': abs(up_ask - down_ask),
+                'is_recovery': False,
+                'is_arbitrage': True,
+                'entry_reason': f'arb_entry_{time_left}s',
+                'winner_ratio': 0.0,
+            }
+
+        # ─────────────────────────────────────────────────────────
+        # DIRECTIONAL MODE (fallback when no ARB edge)
+        # ─────────────────────────────────────────────────────────
+
         # CONFIDENCE (min spread between sides indicates market has picked a side)
         confidence = abs(up_ask - down_ask)
         if confidence < self.min_confidence:
@@ -227,6 +261,11 @@ class LateEntryStrategy:
         self.last_entry[market] = now
         self.last_favorite[market] = side
 
+        logger.info(
+            "[DIR_ENTRY] pair_cost=%.4f side=%s fav=%.3f stc=%ds %s",
+            pair_cost, side, fav_price, time_left, market,
+        )
+
         return {
             'favored': {
                 'side': side,
@@ -240,6 +279,7 @@ class LateEntryStrategy:
             },
             'confidence': confidence,
             'is_recovery': False,
+            'is_arbitrage': False,
             'entry_reason': f'late_entry_{time_left}s',
             'winner_ratio': 0.0
         }

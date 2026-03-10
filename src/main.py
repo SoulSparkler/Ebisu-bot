@@ -417,7 +417,10 @@ def main():
     # {coin: {market_slug: price or status}}
     # Values: positive float (valid price), -1 (skipped - started mid-market)
     market_start_prices = {coin: {} for coin in COINS}
-    
+
+    # Track arbitrage positions per coin — flip_stop does not apply to these
+    arb_markets = {coin: set() for coin in COINS}
+
     # Track pending markets for EACH coin separately
     # {coin: {market_slug: {...}}}
     pending_markets = {coin: {} for coin in COINS}
@@ -1707,7 +1710,7 @@ def main():
                         # Triggers when our side price drops too low
                         # ─────────────────────────────────────────────────
                         strategy = strategies.get(strategy_name)
-                        if strategy and our_price <= strategy.flip_stop_price:
+                        if strategy and our_price <= strategy.flip_stop_price and market_slug not in arb_markets[coin]:
                             # Double-check position still exists (race condition protection)
                             trader = multi_trader.get_trader(strategy_name)
                             if not trader or market_slug not in trader.positions:
@@ -1871,13 +1874,36 @@ def main():
                         )
                         
                         if success and contracts > 0:
+                            # ARBITRAGE: also enter the hedge side simultaneously
+                            if signal.get('is_arbitrage'):
+                                hedge = signal.get('hedge', {})
+                                hedge_side = hedge.get('side')
+                                hedge_contracts = hedge.get('contracts', 0)
+                                hedge_price = hedge.get('price', 0)
+                                if hedge_side and hedge_contracts > 0:
+                                    hedge_success = multi_trader.enter_position(
+                                        strategy_name=strategy_name,
+                                        market_slug=market_slug,
+                                        side=hedge_side,
+                                        price=hedge_price,
+                                        contracts=hedge_contracts,
+                                        up_ask=up_ask,
+                                        down_ask=down_ask,
+                                        seconds_till_end=market_state.get('seconds_till_end', 0)
+                                    )
+                                    if hedge_success:
+                                        arb_markets[coin].add(market_slug)
+                                        print(f"[ARB_ENTRY_COMPLETE] market={market_slug} coin={coin} — both sides filled, flip_stop disabled")
+                                    else:
+                                        print(f"[ARB_HEDGE_FAILED] market={market_slug} coin={coin} — flip_stop remains active, position is now directional")
+
                             # Update position stats after entry
                             updated_stats = multi_trader.get_market_stats(strategy_name, market_slug, up_ask, down_ask)
                             if updated_stats:
                                 total_entries = updated_stats.get('total_entries', 0)
                                 total_invested = updated_stats.get('total_invested', 0)
                                 unrealized_pnl = updated_stats.get('unrealized_pnl', 0)
-                                
+
                                 # Print entry confirmation
                                 print(f"[{strategy_name:30s}] {market_slug} | {side:5s} {contracts:3.0f} @ ${price:.2f} | "
                                       f"Total: {total_entries:3d} entries ${total_invested:7.2f} | PnL: ${unrealized_pnl:+7.2f}")
@@ -2030,6 +2056,7 @@ def main():
 
                         # Remove from tracking
                         del market_start_prices[coin][prev_market]
+                        arb_markets[coin].discard(prev_market)
                 
                 # STEP 2: Track market start price
                 if market_slug not in market_start_prices[coin]:
