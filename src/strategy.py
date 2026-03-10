@@ -10,6 +10,21 @@ logger = logging.getLogger("ebisu.strategy")
 # Hard ceiling: never enter when pair cost >= this value
 PAIR_COST_CEILING = 0.99  # Must be < 1.00 to have any margin after fees
 
+# Safe bounds for every tunable parameter (min, max)
+PARAM_LIMITS: Dict = {
+    'pair_cost_ceiling':         (0.90, 0.995),
+    'entry_window_sec':          (60,   900),
+    'entry_frequency_sec':       (1,    60),
+    'min_confidence':            (0.05, 0.50),
+    'max_spread':                (1.00, 1.10),
+    'price_max':                 (0.50, 0.98),
+    'max_investment_per_market': (10,   1000),
+    'sizing_above_180':          (1,    50),
+    'sizing_above_120':          (1,    50),
+    'sizing_below_120':          (1,    50),
+    'flip_stop_price':           (0.10, 0.49),
+}
+
 
 class LateEntryStrategy:
     """Late Entry V3 - enter across full 15-minute window, buy the favorite"""
@@ -37,8 +52,11 @@ class LateEntryStrategy:
         # Flip-stop price (price reversal protection)
         exit_cfg = config.get('exit', {})
         flip_cfg = exit_cfg.get('flip_stop', {})
-        self.flip_stop_price = flip_cfg.get('price_threshold', 0.48)
+        self.flip_stop_price = flip_cfg.get('price_threshold', 0.30)
         
+        # Pair-cost ceiling (can be tuned via /setparam)
+        self.pair_cost_ceiling = PAIR_COST_CEILING
+
         # Track last entry per market
         self.last_entry = {}
         self.last_favorite = {}
@@ -53,11 +71,11 @@ class LateEntryStrategy:
 
         simple_pair_cost = up_ask + down_ask
 
-        if simple_pair_cost >= PAIR_COST_CEILING:
+        if simple_pair_cost >= self.pair_cost_ceiling:
             logger.debug(
                 "PAIR_COST_BLOCKED simple_pair=%.4f ceiling=%.4f "
                 "ask_up=%.3f ask_down=%.3f",
-                simple_pair_cost, PAIR_COST_CEILING,
+                simple_pair_cost, self.pair_cost_ceiling,
                 up_ask, down_ask,
             )
             return False
@@ -90,11 +108,11 @@ class LateEntryStrategy:
 
         if sim_shares > 0:
             effective_avg_price = sim_invested / sim_shares
-            if effective_avg_price >= PAIR_COST_CEILING:
+            if effective_avg_price >= self.pair_cost_ceiling:
                 logger.warning(
                     "REJECT_FILL effective_avg_price=%.4f >= %.2f "
                     "side=%s qty=%.1f price=%.3f",
-                    effective_avg_price, PAIR_COST_CEILING, side, qty, price,
+                    effective_avg_price, self.pair_cost_ceiling, side, qty, price,
                 )
                 return False
 
@@ -238,6 +256,67 @@ class LateEntryStrategy:
             'wr_recoveries': 0
         }
     
+    def reload_config(self, params: Dict):
+        """
+        Hot-reload strategy parameters from a flat dict (e.g. loaded from DB).
+        All values are clamped to PARAM_LIMITS before applying.
+        Unknown keys are ignored.
+        """
+        def clamp(key, val):
+            lo, hi = PARAM_LIMITS.get(key, (None, None))
+            if lo is None:
+                return val
+            return max(lo, min(hi, val))
+
+        changed = []
+        for key, raw in params.items():
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                continue
+            safe = clamp(key, val)
+            if key == 'pair_cost_ceiling':
+                self.pair_cost_ceiling = safe; changed.append(f"pair_cost_ceiling={safe}")
+            elif key == 'entry_window_sec':
+                self.entry_window = int(safe); changed.append(f"entry_window={int(safe)}")
+            elif key == 'entry_frequency_sec':
+                self.entry_freq = int(safe); changed.append(f"entry_freq={int(safe)}")
+            elif key == 'min_confidence':
+                self.min_confidence = safe; changed.append(f"min_confidence={safe}")
+            elif key == 'max_spread':
+                self.max_spread = safe; changed.append(f"max_spread={safe}")
+            elif key == 'price_max':
+                self.price_max = safe; changed.append(f"price_max={safe}")
+            elif key == 'max_investment_per_market':
+                self.max_investment = safe; changed.append(f"max_investment={safe}")
+            elif key == 'sizing_above_180':
+                self.size_above_180 = int(safe); changed.append(f"size_above_180={int(safe)}")
+            elif key == 'sizing_above_120':
+                self.size_above_120 = int(safe); changed.append(f"size_above_120={int(safe)}")
+            elif key == 'sizing_below_120':
+                self.size_below_120 = int(safe); changed.append(f"size_below_120={int(safe)}")
+            elif key == 'flip_stop_price':
+                self.flip_stop_price = safe; changed.append(f"flip_stop_price={safe}")
+        if changed:
+            logger.info("Strategy config reloaded: %s", ", ".join(changed))
+        return changed
+
+    def get_config(self) -> Dict:
+        """Return current tunable parameters as a flat dict (for /showparams)"""
+        return {
+            'pair_cost_ceiling':         self.pair_cost_ceiling,
+            'entry_window_sec':          self.entry_window,
+            'entry_frequency_sec':       self.entry_freq,
+            'min_confidence':            self.min_confidence,
+            'max_spread':                self.max_spread,
+            'price_max':                 self.price_max,
+            'max_investment_per_market': self.max_investment,
+            'sizing_above_180':          self.size_above_180,
+            'sizing_above_120':          self.size_above_120,
+            'sizing_below_120':          self.size_below_120,
+            'flip_stop_price':           self.flip_stop_price,
+        }
+
     def reset_market(self, market_slug: str):
         """Reset tracking for a market"""
         if market_slug in self.last_entry:

@@ -303,9 +303,11 @@ Winner: {winner}"""
         if self.enabled and self.event_callback:
             self.event_callback(f"Stopped (sent:{self.sent_count} drop:{self.dropped_count} err:{self.error_count})", 'telegram')
     
-    def start_command_listener(self, on_chart_command, on_balance_command=None, 
+    def start_command_listener(self, on_chart_command, on_balance_command=None,
                                on_positions_command=None, on_redeem_command=None, on_redeem_callbacks=None,
-                               on_shutdown_command=None, on_shutdown_callbacks=None):
+                               on_shutdown_command=None, on_shutdown_callbacks=None,
+                               on_setparam_command=None, on_showparams_command=None,
+                               on_showlogs_command=None):
         """
         Start background thread to listen for Telegram commands
         THREAD-SAFE: Runs in separate daemon thread with full error handling
@@ -500,6 +502,45 @@ Winner: {winner}"""
                                         self.event_callback(f"Shutdown cmd error: {error_msg[:40]}", 'error')
                                     self.send_message(f"❌ Error executing shutdown:\n<code>{error_msg}</code>")
                             
+                            elif text.startswith('/setparam '):
+                                if self.event_callback:
+                                    self.event_callback(f"Received {text[:40]}", 'telegram')
+                                try:
+                                    parts = text.split()
+                                    if len(parts) != 3:
+                                        self.send_message("❌ Usage: /setparam <key> <value>\nExample: /setparam pair_cost_ceiling 0.97")
+                                    elif on_setparam_command:
+                                        on_setparam_command(parts[1], parts[2])
+                                    else:
+                                        self.send_message("❌ setparam not available")
+                                except Exception as e:
+                                    self.send_message(f"❌ Error: <code>{str(e)[:100]}</code>")
+
+                            elif text in ['/showparams', '/params']:
+                                if self.event_callback:
+                                    self.event_callback(f"Received {text}", 'telegram')
+                                try:
+                                    if on_showparams_command:
+                                        on_showparams_command()
+                                    else:
+                                        self.send_message("❌ showparams not available")
+                                except Exception as e:
+                                    self.send_message(f"❌ Error: <code>{str(e)[:100]}</code>")
+
+                            elif text.startswith('/showlogs') or text.startswith('/logs'):
+                                if self.event_callback:
+                                    self.event_callback(f"Received {text}", 'telegram')
+                                try:
+                                    parts = text.split()
+                                    n = int(parts[1]) if len(parts) > 1 else 10
+                                    n = max(1, min(n, 50))  # clamp 1-50
+                                    if on_showlogs_command:
+                                        on_showlogs_command(n)
+                                    else:
+                                        self.send_message("❌ showlogs not available")
+                                except Exception as e:
+                                    self.send_message(f"❌ Error: <code>{str(e)[:100]}</code>")
+
                             elif text in ['/help', '/start']:
                                 help_text = """<b>📊 Trading Bot Commands:</b>
 
@@ -508,10 +549,15 @@ Winner: {winner}"""
 /t or /positions - Show active positions
 /r or /redeem - Redeem completed markets (interactive)
 /off or /stop - Emergency shutdown (with confirmation)
-/help - Show this help message
+
+<b>⚙️ Strategy Tuning:</b>
+/setparam &lt;key&gt; &lt;value&gt; - Update a strategy parameter
+/showparams - Show current strategy parameters
+/showlogs [n] - Show last N trades (default 10)
+
+<b>Available keys:</b> pair_cost_ceiling, entry_window_sec, entry_frequency_sec, min_confidence, price_max, max_investment_per_market, sizing_above_180, sizing_above_120, sizing_below_120, flip_stop_price
 
 <b>💡 Tip:</b> Charts are sent automatically every 10 markets.
-
 <b>🔒 Security:</b> Commands only work from authorized chat ID."""
                                 self.send_message(help_text)
                             

@@ -224,3 +224,57 @@ def load_trades_for_strategy(strategy_name: str) -> list:
     except Exception as e:
         print(f"[DB] ⚠️ Failed to load trades: {e}")
         return []
+
+
+def save_strategy_config(params: Dict):
+    """Persist strategy parameters to bot_state table (key = 'strategy_config')"""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO bot_state (key, value, updated_at)
+            VALUES ('strategy_config', %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET
+                value = EXCLUDED.value,
+                updated_at = NOW()
+        """, (json.dumps(params),))
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"[DB] ✅ Strategy config saved: {params}")
+    except Exception as e:
+        print(f"[DB] ⚠️ Failed to save strategy config: {e}")
+
+
+def load_strategy_config() -> Optional[Dict]:
+    """Load strategy parameters from bot_state table (key = 'strategy_config')"""
+    try:
+        conn = get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT value FROM bot_state WHERE key = 'strategy_config'")
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return dict(row['value']) if row else None
+    except Exception as e:
+        print(f"[DB] ⚠️ Failed to load strategy config: {e}")
+        return None
+
+
+def load_recent_trades(limit: int = 10) -> list:
+    """Load the N most recent trades from PostgreSQL"""
+    try:
+        conn = get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT created_at, coin, winner, pnl, roi_pct, exit_type FROM trades "
+            "ORDER BY created_at DESC LIMIT %s",
+            (limit,)
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return list(rows)
+    except Exception as e:
+        print(f"[DB] ⚠️ Failed to load recent trades: {e}")
+        return []

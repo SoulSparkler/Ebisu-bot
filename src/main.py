@@ -438,6 +438,63 @@ def main():
     # ═══════════════════════════════════════════════════════════════
     # TELEGRAM COMMAND HANDLER - Thread-safe chart generation on demand
     # ═══════════════════════════════════════════════════════════════
+
+    def handle_setparam_command(key: str, raw_value: str):
+        """Update one strategy parameter in DB and hot-reload all running strategies."""
+        from db import save_strategy_config, load_strategy_config
+        try:
+            value = float(raw_value)
+        except ValueError:
+            notifier.send_message(f"❌ <code>{raw_value}</code> is not a number")
+            return
+
+        # Load current stored config (or empty dict)
+        current = load_strategy_config() or {}
+        current[key] = value
+        save_strategy_config(current)
+
+        # Hot-reload every running strategy instance
+        changed_all = []
+        for strategy in strategies.values():
+            changed = strategy.reload_config({key: value})
+            changed_all.extend(changed)
+
+        if changed_all:
+            notifier.send_message(f"✅ Applied: <code>{', '.join(changed_all)}</code>")
+        else:
+            notifier.send_message(f"⚠️ Unknown param <code>{key}</code> — saved to DB but not applied.\nSee /help for valid keys.")
+
+    def handle_showparams_command():
+        """Show current strategy parameters (reads from first strategy instance)."""
+        if not strategies:
+            notifier.send_message("❌ No strategies running")
+            return
+        first = next(iter(strategies.values()))
+        cfg = first.get_config()
+        lines = [f"<b>⚙️ Current Strategy Parameters:</b>"]
+        for k, v in cfg.items():
+            lines.append(f"  <code>{k}</code> = {v}")
+        notifier.send_message("\n".join(lines))
+
+    def handle_showlogs_command(n: int):
+        """Show last N trades from DB."""
+        from db import load_recent_trades
+        rows = load_recent_trades(n)
+        if not rows:
+            notifier.send_message("📭 No trades in DB yet")
+            return
+        lines = [f"<b>📋 Last {len(rows)} trades:</b>"]
+        for r in rows:
+            ts = str(r['created_at'])[:16]
+            coin = (r.get('coin') or '?').upper()
+            winner = r.get('winner') or '?'
+            pnl = r.get('pnl') or 0
+            roi = r.get('roi_pct') or 0
+            exit_type = r.get('exit_type') or ''
+            emoji = "🟢" if pnl >= 0 else "🔴"
+            lines.append(f"{emoji} {ts} {coin} {winner} ${pnl:+.2f} ({roi:+.1f}%) [{exit_type}]")
+        notifier.send_message("\n".join(lines))
+
     def handle_chart_command():
         """
         Generate and send PnL chart on demand when user sends /chart or /pnl
@@ -1105,7 +1162,10 @@ def main():
             on_redeem_command=handle_redeem_command,
             on_redeem_callbacks=redeem_callbacks,
             on_shutdown_command=handle_shutdown_command,
-            on_shutdown_callbacks=shutdown_callbacks
+            on_shutdown_callbacks=shutdown_callbacks,
+            on_setparam_command=handle_setparam_command,
+            on_showparams_command=handle_showparams_command,
+            on_showlogs_command=handle_showlogs_command,
         )
         dashboard.add_event("Command listener active (/chart, /b, /t, /r, /off)", 'success')
     except Exception as e:
@@ -1987,6 +2047,18 @@ def main():
                         print(f"\n[{coin.upper()}] ✓ New market witnessed from start: {market_slug}")
                         print(f"[TRADE] Start price: ${price:,.2f}" if price > 0 else "[TRADE] Start price: pending...")
                         print(f"[TRADE] Will trade this market ✓\n")
+
+                        # Reload strategy config from DB at start of each new market window
+                        try:
+                            from db import load_strategy_config
+                            db_params = load_strategy_config()
+                            if db_params:
+                                strategy_name = f"{STRATEGY_BASES[0]}_{coin}"
+                                changed = strategies[strategy_name].reload_config(db_params)
+                                if changed:
+                                    print(f"[{coin.upper()}] ⚙️ Strategy reloaded from DB: {', '.join(changed)}")
+                        except Exception as _reload_err:
+                            print(f"[{coin.upper()}] ⚠️ Strategy reload failed: {_reload_err}")
                         
                 elif market_start_prices[coin][market_slug] == 0:
                     # Update pending market with valid price
