@@ -242,6 +242,18 @@ class LateEntryStrategy:
             )
             return None
 
+        # POSITION SIZE CAP — hard $12 ceiling across both sides
+        if position:
+            up_invested = position.get('up_invested', 0.0)
+            dn_invested = position.get('down_invested', 0.0)
+            current_total = up_invested + dn_invested
+            if current_total >= 12.00:
+                logger.info(
+                    "[POS_CAP] Position size $%.2f exceeds max $12.00 — skipping entry",
+                    current_total,
+                )
+                return None
+
         # INVESTMENT LIMIT
         if position:
             total_cost = position.get('total_cost', 0)
