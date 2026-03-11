@@ -1205,10 +1205,10 @@ class Trader:
             }
         }
 
-        try:
-            from db import save_trade
-            save_trade(entry_data, strategy=self.strategy_name, coin=getattr(self, 'coin', ''))
-        except Exception as e:
-            print(f"[TRADER] ⚠️ Failed to log detailed entry: {e}")
+        # Entry details are captured in the position in-memory.
+        # Do NOT insert into trades table here — that creates one ghost record per
+        # order fill (the bug that produced 5073 records without winner/pnl).
+        # The single authoritative INSERT happens in close_market() / close_market_early_exit()
+        # once per window when the position is fully resolved.
 
 
