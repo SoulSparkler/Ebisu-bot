@@ -1880,6 +1880,8 @@ def main():
                                 hedge_side = hedge.get('side')
                                 hedge_contracts = hedge.get('contracts', 0)
                                 hedge_price = hedge.get('price', 0)
+                                print(f"[ARB_HEDGE] Attempting hedge: market={market_slug} coin={coin} "
+                                      f"side={hedge_side} contracts={hedge_contracts} price={hedge_price:.3f}")
                                 if hedge_side and hedge_contracts > 0:
                                     hedge_success = multi_trader.enter_position(
                                         strategy_name=strategy_name,
@@ -1896,6 +1898,8 @@ def main():
                                         print(f"[ARB_ENTRY_COMPLETE] market={market_slug} coin={coin} — both sides filled, flip_stop disabled")
                                     else:
                                         print(f"[ARB_HEDGE_FAILED] market={market_slug} coin={coin} — flip_stop remains active, position is now directional")
+                                else:
+                                    print(f"[ARB_HEDGE] SKIPPED: hedge_side={hedge_side!r} hedge_contracts={hedge_contracts}")
 
                             # Update position stats after entry
                             updated_stats = multi_trader.get_market_stats(strategy_name, market_slug, up_ask, down_ask)

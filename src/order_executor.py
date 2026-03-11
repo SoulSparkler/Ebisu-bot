@@ -732,7 +732,7 @@ class OrderExecutor:
                     error_msg = api_result.get("errorMsg", "Unknown")
                     print(f"[EXECUTOR] ⚠ [FAK {fak_attempt}] FAILED: {error_msg}")
                     print(f"[EXECUTOR]   🔍 Full API response: {json.dumps(api_result, indent=2)}")
-                    print(f"[EXECUTOR]   📋 Sent OrderArgs: price=${sell_price:.2f}, size={remaining_contracts:.2f} contracts, side=SELL, token={token_id}")
+                    print(f"[EXECUTOR]   📋 Sent OrderArgs: price=${normalized_price:.2f}, size={remaining_contracts:.2f} contracts, side=BUY, token={token_id}")
                 
                 # Pause before next FAK attempt
                 if fak_attempt < MAX_FAK_ATTEMPTS:
