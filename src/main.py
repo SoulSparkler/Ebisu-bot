@@ -1979,7 +1979,10 @@ def main():
                             print(f"{'='*80}\n")
                         else:
                             print(f"\n[{coin.upper()}] Market switch: {prev_market} → {market_slug}")
-                        
+
+                        _is_arb = prev_market in arb_markets[coin]
+                        print(f"[WINDOW_CLOSE] market={prev_market} winner=pending arb={_is_arb}")
+
                         price_start = market_start_prices[coin].get(prev_market, 0)
                         
                         # Check if we had a position in this market

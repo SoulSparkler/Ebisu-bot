@@ -127,6 +127,28 @@ def save_trade(trade: Dict, strategy: str = "", coin: str = ""):
     except Exception as e:
         print(f"[DB] ⚠️ Failed to save trade: {e}")
 
+def load_orders_for_market(market_slug: str) -> list:
+    """Return all successful BUY orders for a market_slug from the DB."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT side, contracts, price, total_spent_usd
+            FROM orders
+            WHERE market_slug = %s AND order_type = 'BUY' AND success = TRUE
+            """,
+            (market_slug,)
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[DB] ⚠️ Failed to load orders for {market_slug}: {e}")
+        return []
+
+
 def save_order(log_entry: Dict):
     """Insert an order log entry into PostgreSQL"""
     try:

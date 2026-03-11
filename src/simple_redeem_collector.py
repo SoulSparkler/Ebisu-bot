@@ -325,69 +325,125 @@ class SimpleRedeemCollector:
                         if api_result.get("success") and api_result.get("winner"):
                             winner = api_result["winner"]
                             print(f"[REDEEM COLLECTOR]   Winner: {winner}")
-                            
+
                             # Determine coin from market_slug
                             coin = None
                             for c in ['btc', 'eth', 'sol', 'xrp']:
                                 if f'{c}-updown-' in slug:
                                     coin = c
                                     break
-                            
+
                             if coin:
                                 strategy_name = f"late_v3_{coin}"
                                 print(f"[REDEEM COLLECTOR]   Creating trade record for {strategy_name}...")
-                                
-                                # Create trade record via multi_trader
+
+                                # Create trade record via multi_trader (works when position is in memory)
                                 result = self.multi_trader.close_market(
                                     strategy_name=strategy_name,
                                     market_slug=slug,
                                     winner=winner,
-                                    btc_start=0.0,  # Unknown for redeems
+                                    btc_start=0.0,
                                     btc_final=0.0
                                 )
-                                
+
                                 if result:
+                                    is_arb = result.get('up_invested', 0) > 0 and result.get('down_invested', 0) > 0
+                                    print(f"[WINDOW_CLOSE] market={slug} winner={winner} arb={is_arb}")
                                     print(f"[REDEEM COLLECTOR]   ✅ Trade record created!")
                                     print(f"[REDEEM COLLECTOR]      PnL: ${result['pnl']:+.2f}")
                                     print(f"[REDEEM COLLECTOR]      ROI: {result['roi_pct']:+.1f}%")
-                                    
-                                    # Send Telegram notification
-                                    if self.notifier:
-                                        try:
-                                            session_stats = self.multi_trader.get_session_stats(strategy_name, 0)
-                                            
-                                            # Create correct format portfolio_stats for Telegram
-                                            portfolio_stats = {}
-                                            for c in ['btc', 'eth', 'sol', 'xrp']:
-                                                trader_name = f"late_v3_{c}"
-                                                trader = self.multi_trader.traders.get(trader_name)
-                                                if trader:
-                                                    perf = trader.get_performance_stats()
-                                                    portfolio_stats[f'{c}_pnl'] = trader.current_capital - trader.starting_capital
-                                                    portfolio_stats[f'{c}_wr'] = perf['win_rate']
-                                                    portfolio_stats[f'{c}_markets_played'] = perf['total_trades']
-                                                else:
-                                                    portfolio_stats[f'{c}_pnl'] = 0
-                                                    portfolio_stats[f'{c}_wr'] = 0
-                                                    portfolio_stats[f'{c}_markets_played'] = 0
-                                            
-                                            portfolio_stats['total_pnl'] = sum(portfolio_stats.get(f'{c}_pnl', 0) for c in ['btc', 'eth', 'sol', 'xrp'])
-                                            portfolio_stats['uptime'] = 0  # For redeem uptime doesn't matter
-                                            
-                                            self.notifier.send_market_closed(
-                                                coin=coin,
-                                                trade=result,
-                                                session_stats=session_stats,
-                                                portfolio_stats=portfolio_stats
-                                            )
-                                            print(f"[REDEEM COLLECTOR]      ✅ Telegram notification sent")
-                                        except Exception as notify_err:
-                                            print(f"[REDEEM COLLECTOR]      ⚠️ Notification failed: {notify_err}")
-                                            import traceback
-                                            traceback.print_exc()
+
                                 else:
-                                    print(f"[REDEEM COLLECTOR]   ⚠️ Trade record creation returned None")
-                                    print(f"[REDEEM COLLECTOR]      (Position might have been empty)")
+                                    # ═══════════════════════════════════════════════════════════
+                                    # 🔥 FALLBACK: Position not in memory (restart cleared it).
+                                    # Reconstruct trade record from DB orders so every ARB
+                                    # window that completes gets exactly one DB record.
+                                    # ═══════════════════════════════════════════════════════════
+                                    print(f"[REDEEM COLLECTOR]   ⚠️ Position not in memory — reconstructing from DB orders...")
+                                    try:
+                                        from db import load_orders_for_market, save_trade
+                                        orders = load_orders_for_market(slug)
+
+                                        up_invested = sum(o['total_spent_usd'] for o in orders if o['side'] == 'UP')
+                                        down_invested = sum(o['total_spent_usd'] for o in orders if o['side'] == 'DOWN')
+                                        up_shares = sum(o['contracts'] for o in orders if o['side'] == 'UP')
+                                        down_shares = sum(o['contracts'] for o in orders if o['side'] == 'DOWN')
+                                        total_cost = up_invested + down_invested
+                                        total_entries = len(orders)
+                                        payout = amount  # actual redemption amount from on-chain
+                                        pnl = payout - total_cost
+                                        roi_pct = (pnl / total_cost * 100) if total_cost > 0 else 0.0
+                                        winner_shares = up_shares if winner == 'UP' else down_shares
+                                        total_shares = up_shares + down_shares
+                                        winner_ratio = (winner_shares / total_shares * 100) if total_shares > 0 else 50.0
+                                        is_arb = up_invested > 0 and down_invested > 0
+
+                                        print(f"[WINDOW_CLOSE] market={slug} winner={winner} arb={is_arb}")
+                                        print(f"[REDEEM COLLECTOR]   Reconstructed: cost=${total_cost:.2f} payout=${payout:.2f} pnl=${pnl:+.2f} arb={is_arb}")
+
+                                        fallback_trade = {
+                                            'market_slug': slug,
+                                            'winner': winner,
+                                            'exit_type': 'natural_close',
+                                            'exit_reason': 'natural_close_reconstructed',
+                                            'pnl': pnl,
+                                            'roi_pct': roi_pct,
+                                            'total_cost': total_cost,
+                                            'payout': payout,
+                                            'winner_ratio': winner_ratio,
+                                            'total_entries': total_entries,
+                                            'up_entries': sum(1 for o in orders if o['side'] == 'UP'),
+                                            'down_entries': sum(1 for o in orders if o['side'] == 'DOWN'),
+                                            'up_invested': up_invested,
+                                            'down_invested': down_invested,
+                                            'up_shares': up_shares,
+                                            'down_shares': down_shares,
+                                            'duration': None,
+                                            'close_timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                                        }
+
+                                        save_trade(fallback_trade, strategy=strategy_name, coin=coin)
+                                        result = fallback_trade
+                                        print(f"[REDEEM COLLECTOR]   ✅ Fallback trade record saved (PnL ${pnl:+.2f})")
+
+                                    except Exception as fb_err:
+                                        print(f"[REDEEM COLLECTOR]   ❌ Fallback trade record failed: {fb_err}")
+                                        import traceback
+                                        traceback.print_exc()
+
+                                # Send Telegram notification for any successfully recorded trade
+                                if result and self.notifier:
+                                    try:
+                                        session_stats = self.multi_trader.get_session_stats(strategy_name, 0)
+
+                                        portfolio_stats = {}
+                                        for c in ['btc', 'eth', 'sol', 'xrp']:
+                                            trader_name = f"late_v3_{c}"
+                                            trader = self.multi_trader.traders.get(trader_name)
+                                            if trader:
+                                                perf = trader.get_performance_stats()
+                                                portfolio_stats[f'{c}_pnl'] = trader.current_capital - trader.starting_capital
+                                                portfolio_stats[f'{c}_wr'] = perf['win_rate']
+                                                portfolio_stats[f'{c}_markets_played'] = perf['total_trades']
+                                            else:
+                                                portfolio_stats[f'{c}_pnl'] = 0
+                                                portfolio_stats[f'{c}_wr'] = 0
+                                                portfolio_stats[f'{c}_markets_played'] = 0
+
+                                        portfolio_stats['total_pnl'] = sum(portfolio_stats.get(f'{c}_pnl', 0) for c in ['btc', 'eth', 'sol', 'xrp'])
+                                        portfolio_stats['uptime'] = 0
+
+                                        self.notifier.send_market_closed(
+                                            coin=coin,
+                                            trade=result,
+                                            session_stats=session_stats,
+                                            portfolio_stats=portfolio_stats
+                                        )
+                                        print(f"[REDEEM COLLECTOR]      ✅ Telegram notification sent")
+                                    except Exception as notify_err:
+                                        print(f"[REDEEM COLLECTOR]      ⚠️ Notification failed: {notify_err}")
+                                        import traceback
+                                        traceback.print_exc()
                             else:
                                 print(f"[REDEEM COLLECTOR]   ⚠️ Could not determine coin from slug: {slug}")
                         else:
