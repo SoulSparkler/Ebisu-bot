@@ -322,8 +322,8 @@ class SimpleRedeemCollector:
                         print(f"[REDEEM COLLECTOR]   Fetching market outcome from API...")
                         api_result = get_market_outcome(slug)
                         
-                        if api_result.get("success") and api_result.get("winner"):
-                            winner = api_result["winner"]
+                        if api_result.get("success"):
+                            winner = api_result.get("winner") or 'UNKNOWN'
                             print(f"[REDEEM COLLECTOR]   Winner: {winner}")
 
                             # Determine coin from market_slug
@@ -447,8 +447,62 @@ class SimpleRedeemCollector:
                             else:
                                 print(f"[REDEEM COLLECTOR]   ⚠️ Could not determine coin from slug: {slug}")
                         else:
-                            print(f"[REDEEM COLLECTOR]   ⚠️ Market outcome not available")
-                            print(f"[REDEEM COLLECTOR]      API result: {api_result}")
+                            # API call itself failed — still try to write DB record
+                            # using 'UNKNOWN' winner so the window is not silently lost.
+                            print(f"[REDEEM COLLECTOR]   ⚠️ Market outcome API failed: {api_result.get('error', '?')}")
+                            print(f"[REDEEM COLLECTOR]   Attempting DB write with winner=UNKNOWN...")
+                            try:
+                                coin_fallback = None
+                                for c in ['btc', 'eth', 'sol', 'xrp']:
+                                    if f'{c}-updown-' in slug:
+                                        coin_fallback = c
+                                        break
+                                if coin_fallback:
+                                    strategy_name_fb = f"late_v3_{coin_fallback}"
+                                    result_fb = self.multi_trader.close_market(
+                                        strategy_name=strategy_name_fb,
+                                        market_slug=slug,
+                                        winner='UNKNOWN',
+                                        btc_start=0.0,
+                                        btc_final=0.0
+                                    )
+                                    if result_fb:
+                                        print(f"[WINDOW_CLOSE] market={slug} winner=UNKNOWN arb=? (api_failed)")
+                                        print(f"[REDEEM COLLECTOR]   ✅ DB record written with winner=UNKNOWN")
+                                    else:
+                                        from db import load_orders_for_market, save_trade
+                                        orders = load_orders_for_market(slug)
+                                        if orders:
+                                            up_inv = sum(o['total_spent_usd'] for o in orders if o['side'] == 'UP')
+                                            dn_inv = sum(o['total_spent_usd'] for o in orders if o['side'] == 'DOWN')
+                                            tc = up_inv + dn_inv
+                                            pnl = amount - tc
+                                            is_arb = up_inv > 0 and dn_inv > 0
+                                            fb = {
+                                                'market_slug': slug,
+                                                'winner': 'UNKNOWN',
+                                                'exit_type': 'natural_close',
+                                                'exit_reason': 'natural_close_reconstructed_api_fail',
+                                                'pnl': pnl,
+                                                'roi_pct': (pnl / tc * 100) if tc > 0 else 0.0,
+                                                'total_cost': tc,
+                                                'payout': amount,
+                                                'winner_ratio': 50.0,
+                                                'total_entries': len(orders),
+                                                'up_entries': sum(1 for o in orders if o['side'] == 'UP'),
+                                                'down_entries': sum(1 for o in orders if o['side'] == 'DOWN'),
+                                                'up_invested': up_inv,
+                                                'down_invested': dn_inv,
+                                                'up_shares': sum(o['contracts'] for o in orders if o['side'] == 'UP'),
+                                                'down_shares': sum(o['contracts'] for o in orders if o['side'] == 'DOWN'),
+                                                'duration': None,
+                                                'close_timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                                            }
+                                            save_trade(fb, strategy=strategy_name_fb, coin=coin_fallback)
+                                            print(f"[WINDOW_CLOSE] market={slug} winner=UNKNOWN arb={is_arb} (api_failed_fallback)")
+                                            print(f"[REDEEM COLLECTOR]   ✅ Fallback DB record saved (pnl ${pnl:+.2f})")
+                            except Exception as _unk_err:
+                                print(f"[REDEEM COLLECTOR]   ❌ UNKNOWN-winner fallback failed: {_unk_err}")
                     
                     except Exception as trade_err:
                         print(f"[REDEEM COLLECTOR]   ⚠️ Failed to create trade record: {trade_err}")

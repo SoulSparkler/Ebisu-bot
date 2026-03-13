@@ -421,6 +421,10 @@ def main():
     # Track arbitrage positions per coin — flip_stop does not apply to these
     arb_markets = {coin: set() for coin in COINS}
 
+    # Pending hedge retries: {coin: {market_slug: {side, contracts}}}
+    # Set when favored side fills but hedge order fails; retried on every price tick.
+    pending_hedges = {coin: {} for coin in COINS}
+
     # Track pending markets for EACH coin separately
     # {coin: {market_slug: {...}}}
     pending_markets = {coin: {} for coin in COINS}
@@ -1796,13 +1800,40 @@ def main():
                                 return  # Exit callback after closing
                     
                     # ═══════════════════════════════════════════════════════
+                    # PENDING HEDGE RETRY
+                    # Favored filled on a previous tick but hedge order failed.
+                    # Retry hedge on every price update until it fills or market ends.
+                    # ═══════════════════════════════════════════════════════
+                    if market_slug in pending_hedges[coin] and market_slug not in arb_markets[coin]:
+                        ph = pending_hedges[coin][market_slug]
+                        ph_price = up_ask if ph['side'] == 'UP' else down_ask
+                        retry_success = multi_trader.enter_position(
+                            strategy_name=strategy_name,
+                            market_slug=market_slug,
+                            side=ph['side'],
+                            price=ph_price,
+                            contracts=ph['contracts'],
+                            up_ask=up_ask,
+                            down_ask=down_ask,
+                            seconds_till_end=market_state.get('seconds_till_end', 0)
+                        )
+                        if retry_success:
+                            arb_markets[coin].add(market_slug)
+                            pending_hedges[coin].pop(market_slug)
+                            print(f"[ARB_HEDGE_RETRY_OK] market={market_slug} coin={coin} "
+                                  f"side={ph['side']} — flip_stop disabled")
+                        # Whether retry succeeded or not, skip new signal this tick
+                        # to avoid doubling the favored side while hedge is resolving
+                        continue
+
+                    # ═══════════════════════════════════════════════════════
                     # PART 2: ENTRY SIGNAL CHECK (real-time)
                     # ═══════════════════════════════════════════════════════
                     strategy = strategies.get(strategy_name)
                     if not strategy:
                         print(f"[ERROR] Strategy {strategy_name} not found in strategies dict!")
                         continue
-                    
+
                     # Generate signal with current market state
                     signal = strategy.should_enter(market_state, position_stats)
 
@@ -1895,9 +1926,15 @@ def main():
                                     )
                                     if hedge_success:
                                         arb_markets[coin].add(market_slug)
+                                        pending_hedges[coin].pop(market_slug, None)
                                         print(f"[ARB_ENTRY_COMPLETE] market={market_slug} coin={coin} — both sides filled, flip_stop disabled")
                                     else:
-                                        print(f"[ARB_HEDGE_FAILED] market={market_slug} coin={coin} — flip_stop remains active, position is now directional")
+                                        # Store for retry on every subsequent price tick
+                                        pending_hedges[coin][market_slug] = {
+                                            'side': hedge_side,
+                                            'contracts': hedge_contracts,
+                                        }
+                                        print(f"[ARB_HEDGE_FAILED] market={market_slug} coin={coin} — hedge queued for retry on next tick")
                                 else:
                                     print(f"[ARB_HEDGE] SKIPPED: hedge_side={hedge_side!r} hedge_contracts={hedge_contracts}")
 
@@ -1993,21 +2030,13 @@ def main():
                         if price_start > 0 or (price_start == 0 and had_position):
                             # 🔥 DISABLED: Old pending_markets logic (replaced by SimpleRedeemCollector)
                             # SimpleRedeemCollector will find and redeem this position automatically via API
+                            _is_arb_pos = prev_market in arb_markets[coin]
+                            print(f"[WINDOW_CLOSE] market={prev_market} status=position_ended arb={_is_arb_pos}")
                             print(f"\n[{coin.upper()}] Market ended: {prev_market}")
                             print(f"[REDEEM] Will be collected by SimpleRedeemCollector API scanner")
-                            # if prev_market not in pending_markets[coin]:
-                            #     redeem_cfg = config.get("execution", {}).get("redeem", {})
-                            #     first_delay = redeem_cfg.get("first_attempt_delay_sec", 300)
-                            #     print(f"[PENDING] Added to pending queue, first redeem attempt in {first_delay // 60} minutes...")
-                            #     pending_markets[coin][prev_market] = {
-                            #         'price_start': price_start if price_start > 0 else 0.0,
-                            #         'price_final': price if price > 0 else 0.0,
-                            #         'first_attempt': time.time(),
-                            #         'attempts': 0,
-                            #         'next_retry': time.time() + first_delay
-                            #     }
                         elif price_start == -1:
                             # Market was skipped (started mid-market)
+                            print(f"[WINDOW_CLOSE] market={prev_market} status=skipped_startup arb=False")
                             markets_skipped[coin] += 1
                             session_stats = multi_trader.get_session_stats(strategy_name, markets_skipped[coin])
                             portfolio_stats = _get_portfolio_stats(multi_trader, markets_skipped, session_start_time)
@@ -2015,6 +2044,7 @@ def main():
                             print(f"\n[{coin.upper()}] ⏭️  Skipped market {prev_market} ended (was started mid-market)")
                         elif price_start == 0 and not had_position:
                             # Market was active but we didn't enter - skipped!
+                            print(f"[WINDOW_CLOSE] market={prev_market} status=no_entry arb=False")
                             markets_skipped[coin] += 1
                             session_stats = multi_trader.get_session_stats(strategy_name, markets_skipped[coin])
                             portfolio_stats = _get_portfolio_stats(multi_trader, markets_skipped, session_start_time)
@@ -2024,6 +2054,7 @@ def main():
                             # 🔥 Market was closed early (stop-loss/flip-stop)
                             # 🔥 DISABLED: Old pending_markets logic (replaced by SimpleRedeemCollector)
                             # SimpleRedeemCollector will find and redeem this position automatically via API
+                            print(f"[WINDOW_CLOSE] market={prev_market} status=early_exit_window arb=False")
                             print(f"\n[{coin.upper()}] Market {prev_market} ended (was closed early)")
                             print(f"[REDEEM] Will be collected by SimpleRedeemCollector API scanner")
                             # if prev_market not in pending_markets[coin]:
@@ -2064,6 +2095,7 @@ def main():
                         # Remove from tracking
                         del market_start_prices[coin][prev_market]
                         arb_markets[coin].discard(prev_market)
+                        pending_hedges[coin].pop(prev_market, None)
                 
                 # STEP 2: Track market start price
                 if market_slug not in market_start_prices[coin]:
