@@ -2001,6 +2001,12 @@ def main():
                 
                 if not market_slug:
                     continue
+
+                seconds_till_end = market_state.get('seconds_till_end', 0)
+                print(
+                    f"[WINDOW_CHECK] market={market_slug} time_remaining={seconds_till_end} "
+                    f"coin={coin} tracked={len(market_start_prices.get(coin, {}))}"
+                )
                 
                 # STEP 1: Check for market switch FIRST
                 for prev_market in list(market_start_prices[coin].keys()):
@@ -2026,6 +2032,11 @@ def main():
                         strategy_name = f"{STRATEGY_BASES[0]}_{coin}"  # Use constant instead of hardcoded
                         trader = multi_trader.get_trader(strategy_name)
                         had_position = trader and prev_market in trader.positions
+                        print(
+                            f"[WINDOW_SWITCH] coin={coin} prev_market={prev_market} "
+                            f"current_market={market_slug} prev_status={price_start} "
+                            f"had_position={had_position} arb={_is_arb}"
+                        )
                         
                         if price_start > 0 or (price_start == 0 and had_position):
                             # 🔥 DISABLED: Old pending_markets logic (replaced by SimpleRedeemCollector)
@@ -2093,6 +2104,11 @@ def main():
                                 print(f"[PAPER] Could not record outcome for {prev_market}: {_pt_err}")
 
                         # Remove from tracking
+                        print(
+                            f"[WINDOW_TRACKING_CLEAR] coin={coin} market={prev_market} "
+                            f"arb={prev_market in arb_markets[coin]} "
+                            f"pending_hedge={prev_market in pending_hedges[coin]}"
+                        )
                         del market_start_prices[coin][prev_market]
                         arb_markets[coin].discard(prev_market)
                         pending_hedges[coin].pop(prev_market, None)

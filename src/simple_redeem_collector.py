@@ -131,7 +131,7 @@ class SimpleRedeemCollector:
     def _check_and_redeem_all(self, check_type: str = "PERIODIC"):
         """
         Check API and redeem ALL
-        
+
         Args:
             check_type: "STARTUP" (at startup) or "PERIODIC" (regular)
         """
@@ -142,10 +142,15 @@ class SimpleRedeemCollector:
         else:
             print(f"[REDEEM COLLECTOR] 🔍 PERIODIC CHECK #{self.stats['total_checks'] + 1}")
         print(f"{'='*80}")
-        
+
         self.stats['total_checks'] += 1
         self.last_check = time.time()
-        
+
+        # DRY_RUN: resolve in-memory positions via price instead of oracle
+        if hasattr(self.executor, 'safety') and self.executor.safety.dry_run:
+            self._dry_run_resolve_from_memory()
+            return
+
         # STEP 1: Query API
         positions = self._fetch_redeemable_positions()
         
@@ -193,6 +198,113 @@ class SimpleRedeemCollector:
         print(f"  Total redeemed (session): {self.stats['total_redeemed']}")
         print(f"{'='*80}\n")
     
+    def _dry_run_resolve_from_memory(self):
+        """
+        DRY_RUN only: scan all in-memory positions across multi_trader traders,
+        fetch Polymarket prices, determine winner as the side with price closest
+        to $1.00, and call close_market() directly — no oracle, no blockchain.
+
+        Logs [DRY_RUN_RESOLVE] for every market processed.
+        """
+        if not self.multi_trader:
+            print(f"[REDEEM COLLECTOR] [DRY_RUN] No multi_trader — skipping dry_run resolve")
+            return
+
+        from polymarket_api import get_market_outcome
+
+        closed_count = 0
+        skipped_count = 0
+
+        for strategy_name, trader in self.multi_trader.traders.items():
+            # snapshot keys so close_market() can safely mutate the dict
+            open_slugs = list(trader.positions.keys())
+            if not open_slugs:
+                continue
+
+            coin = getattr(trader, 'coin', None)
+            if not coin:
+                parts = strategy_name.rsplit('_', 1)
+                coin = parts[-1] if len(parts) > 1 else None
+
+            for slug in open_slugs:
+                try:
+                    api_result = get_market_outcome(slug)
+
+                    prices = api_result.get('prices', [])
+                    price_up = float(prices[0]) if prices and len(prices) >= 1 else 0.5
+                    price_down = float(prices[1]) if prices and len(prices) >= 2 else 0.5
+
+                    # Winner = side whose price is closest to $1.00
+                    if abs(price_up - 1.0) <= abs(price_down - 1.0):
+                        winner = 'UP'
+                    else:
+                        winner = 'DOWN'
+
+                    print(
+                        f"[DRY_RUN_RESOLVE] market={slug} winner={winner} "
+                        f"price_up={price_up:.4f} price_down={price_down:.4f}"
+                    )
+
+                    result = self.multi_trader.close_market(
+                        strategy_name=strategy_name,
+                        market_slug=slug,
+                        winner=winner,
+                        btc_start=0.0,
+                        btc_final=0.0
+                    )
+
+                    if result:
+                        is_arb = result.get('up_invested', 0) > 0 and result.get('down_invested', 0) > 0
+                        print(f"[WINDOW_CLOSE] market={slug} winner={winner} arb={is_arb} (dry_run)")
+                        print(f"[REDEEM COLLECTOR] ✅ [DRY_RUN] Closed {slug}: PnL ${result.get('pnl', 0):+.2f}")
+                        closed_count += 1
+
+                        # Telegram notification
+                        if self.notifier and coin:
+                            try:
+                                session_stats = self.multi_trader.get_session_stats(strategy_name, 0)
+                                portfolio_stats = {}
+                                for c in ['btc', 'eth', 'sol', 'xrp']:
+                                    t = self.multi_trader.traders.get(f'late_v3_{c}')
+                                    if t:
+                                        perf = t.get_performance_stats()
+                                        portfolio_stats[f'{c}_pnl'] = t.current_capital - t.starting_capital
+                                        portfolio_stats[f'{c}_wr'] = perf['win_rate']
+                                        portfolio_stats[f'{c}_markets_played'] = perf['total_trades']
+                                    else:
+                                        portfolio_stats[f'{c}_pnl'] = 0
+                                        portfolio_stats[f'{c}_wr'] = 0
+                                        portfolio_stats[f'{c}_markets_played'] = 0
+                                portfolio_stats['total_pnl'] = sum(
+                                    portfolio_stats.get(f'{c}_pnl', 0) for c in ['btc', 'eth', 'sol', 'xrp']
+                                )
+                                portfolio_stats['uptime'] = 0
+                                self.notifier.send_market_closed(
+                                    coin=coin,
+                                    trade=result,
+                                    session_stats=session_stats,
+                                    portfolio_stats=portfolio_stats
+                                )
+                            except Exception as notify_err:
+                                print(f"[REDEEM COLLECTOR]   ⚠️ [DRY_RUN] Notification failed: {notify_err}")
+                    else:
+                        # Position not in memory (already closed or never opened)
+                        print(
+                            f"[REDEEM COLLECTOR] ⚠️ [DRY_RUN] close_market returned None for {slug} "
+                            f"(position may already be closed)"
+                        )
+                        skipped_count += 1
+
+                except Exception as e:
+                    print(f"[REDEEM COLLECTOR] ❌ [DRY_RUN] Error resolving {slug}: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+        print(
+            f"[REDEEM COLLECTOR] [DRY_RUN] Resolve complete: "
+            f"closed={closed_count} skipped={skipped_count}"
+        )
+
     def _fetch_redeemable_positions(self) -> Optional[List[Dict]]:
         """
         Query Polymarket API to get redeemable positions
@@ -274,6 +386,12 @@ class SimpleRedeemCollector:
         neg_risk = position.get('negativeRisk', True)
         current_value = position.get('currentValue', 0)
         outcome = position.get('outcome', '')
+        coin = None
+        for c in ['btc', 'eth', 'sol', 'xrp']:
+            if f'{c}-updown-' in (slug or ''):
+                coin = c
+                break
+        strategy_name = f"late_v3_{coin}" if coin else None
         
         print(f"\n[REDEEM COLLECTOR] [{index}/{total}] Processing: {slug}")
         print(f"  Condition ID: {condition_id[:20]}...")
@@ -299,6 +417,15 @@ class SimpleRedeemCollector:
             print(f"[REDEEM COLLECTOR]   UP token: {token_ids['UP'][:10]}...")
             print(f"[REDEEM COLLECTOR]   DOWN token: {token_ids['DOWN'][:10]}...")
             print(f"[REDEEM COLLECTOR]   Calling redeem_position()...")
+
+            position_in_memory = False
+            if self.multi_trader and strategy_name:
+                trader = self.multi_trader.traders.get(strategy_name)
+                position_in_memory = bool(trader and slug in trader.positions)
+            print(
+                f"[WINDOW_FINALIZE] market={slug} coin={coin or 'unknown'} "
+                f"position_in_memory={position_in_memory} stage=before_redeem"
+            )
             
             # Call redeem via order_executor
             success, amount = self.executor.redeem_position(
@@ -312,6 +439,10 @@ class SimpleRedeemCollector:
             if success:
                 print(f"[REDEEM COLLECTOR] ✅ Redeemed ${amount:.2f} USDC!")
                 self.stats['total_redeemed'] += 1
+                print(
+                    f"[WINDOW_FINALIZE] market={slug} coin={coin or 'unknown'} "
+                    f"position_in_memory={position_in_memory} stage=after_redeem amount={amount:.2f}"
+                )
                 
                 # 🔥 FIX: Create trade record for dashboard (for all 4 coins)
                 if self.multi_trader:
@@ -321,20 +452,17 @@ class SimpleRedeemCollector:
                         # Get real market outcome from Polymarket API
                         print(f"[REDEEM COLLECTOR]   Fetching market outcome from API...")
                         api_result = get_market_outcome(slug)
+                        print(
+                            f"[WINDOW_OUTCOME] market={slug} success={api_result.get('success')} "
+                            f"resolved={api_result.get('resolved')} closed={api_result.get('closed')} "
+                            f"winner={api_result.get('winner')}"
+                        )
                         
                         if api_result.get("success"):
                             winner = api_result.get("winner") or 'UNKNOWN'
                             print(f"[REDEEM COLLECTOR]   Winner: {winner}")
 
-                            # Determine coin from market_slug
-                            coin = None
-                            for c in ['btc', 'eth', 'sol', 'xrp']:
-                                if f'{c}-updown-' in slug:
-                                    coin = c
-                                    break
-
                             if coin:
-                                strategy_name = f"late_v3_{coin}"
                                 print(f"[REDEEM COLLECTOR]   Creating trade record for {strategy_name}...")
 
                                 # Create trade record via multi_trader (works when position is in memory)
@@ -354,6 +482,11 @@ class SimpleRedeemCollector:
                                     print(f"[REDEEM COLLECTOR]      ROI: {result['roi_pct']:+.1f}%")
 
                                 else:
+                                    print(
+                                        f"[WINDOW_FINALIZE] market={slug} coin={coin} "
+                                        f"position_in_memory={position_in_memory} "
+                                        f"stage=close_market_returned_none"
+                                    )
                                     # ═══════════════════════════════════════════════════════════
                                     # 🔥 FALLBACK: Position not in memory (restart cleared it).
                                     # Reconstruct trade record from DB orders so every ARB
@@ -450,13 +583,14 @@ class SimpleRedeemCollector:
                             # API call itself failed — still try to write DB record
                             # using 'UNKNOWN' winner so the window is not silently lost.
                             print(f"[REDEEM COLLECTOR]   ⚠️ Market outcome API failed: {api_result.get('error', '?')}")
+                            print(
+                                f"[WINDOW_OUTCOME_FAIL] market={slug} coin={coin or 'unknown'} "
+                                f"position_in_memory={position_in_memory} "
+                                f"error={api_result.get('error', '?')}"
+                            )
                             print(f"[REDEEM COLLECTOR]   Attempting DB write with winner=UNKNOWN...")
                             try:
-                                coin_fallback = None
-                                for c in ['btc', 'eth', 'sol', 'xrp']:
-                                    if f'{c}-updown-' in slug:
-                                        coin_fallback = c
-                                        break
+                                coin_fallback = coin
                                 if coin_fallback:
                                     strategy_name_fb = f"late_v3_{coin_fallback}"
                                     result_fb = self.multi_trader.close_market(
@@ -519,6 +653,11 @@ class SimpleRedeemCollector:
                 
                 return True
             else:
+                print(
+                    f"[WINDOW_FINALIZE] market={slug} coin={coin or 'unknown'} "
+                    f"position_in_memory={position_in_memory} "
+                    f"stage=redeem_failed close_market_called=False"
+                )
                 print(f"[REDEEM COLLECTOR] ⚠️ Redeem failed")
                 print(f"[REDEEM COLLECTOR]    Reason: Oracle not resolved or no tokens")
                 return False
