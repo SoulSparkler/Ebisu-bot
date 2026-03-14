@@ -2009,6 +2009,16 @@ def main():
                 )
                 
                 # STEP 1: Check for market switch FIRST
+                _up_ask_dbg = market_state.get('up_ask', 0)
+                _down_ask_dbg = market_state.get('down_ask', 0)
+                _strat_dbg = f"{STRATEGY_BASES[0]}_{coin}"
+                _ps_dbg = multi_trader.get_market_stats(_strat_dbg, market_slug, _up_ask_dbg, _down_ask_dbg)
+                _pos_val_dbg = _ps_dbg.get('total_invested', 0) if _ps_dbg else 0
+                print(
+                    f"[SWITCH_DEBUG] coin={coin} slug={market_slug} time_remaining={seconds_till_end} "
+                    f"position_value=${_pos_val_dbg:.2f} up_price={_up_ask_dbg:.3f} "
+                    f"tracked_keys={list(market_start_prices[coin].keys())}"
+                )
                 for prev_market in list(market_start_prices[coin].keys()):
                     if prev_market != market_slug and prev_market != "":
                         # Market switch detected!
