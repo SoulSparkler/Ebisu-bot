@@ -258,7 +258,17 @@ class Trader:
         pos[side]['entries'].append(entry)
         pos[side]['total_invested'] += actual_cost
         pos[side]['total_shares'] += actual_contracts
-        
+
+        # POSITION_UPDATE: log after every fill so we can verify tracking
+        _pos_up = pos['UP']
+        _pos_dn = pos['DOWN']
+        print(
+            f"[POSITION_UPDATE] coin={getattr(self, 'coin', '?')} market={market_slug} "
+            f"side={side} actual_contracts={actual_contracts:.3f} actual_cost={actual_cost:.3f} "
+            f"up_invested={_pos_up['total_invested']:.3f} down_invested={_pos_dn['total_invested']:.3f} "
+            f"up_shares={_pos_up['total_shares']:.3f} down_shares={_pos_dn['total_shares']:.3f}"
+        )
+
         # Update market statistics
         self._update_market_stats(market_slug)
         
