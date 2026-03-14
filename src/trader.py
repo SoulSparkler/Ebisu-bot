@@ -209,7 +209,12 @@ class Trader:
                     # ✅ SUCCESS! Using ACTUAL filled amounts
                     actual_contracts = result.filled_size
                     actual_cost = result.total_spent_usd
-                    
+
+                    # FAK fill van 0 is geen succes — geen ghost position aanmaken
+                    if actual_contracts == 0:
+                        print(f"[TRADER] ⚠ FAK fill=0 for {side} @ ${ask_price:.3f} - no position created")
+                        return False
+
                     if actual_contracts != contracts:
                         print(f"[TRADER] ⚠ FAK partial fill: {actual_contracts:.2f}/{contracts} contracts")
                     
