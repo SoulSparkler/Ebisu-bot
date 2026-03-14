@@ -146,8 +146,12 @@ class SimpleRedeemCollector:
         self.stats['total_checks'] += 1
         self.last_check = time.time()
 
+        _has_safety = hasattr(self.executor, 'safety')
+        _dry_run_val = self.executor.safety.dry_run if _has_safety else 'NO_SAFETY_ATTR'
+        print(f"[REDEEM_CHECK] dry_run={_dry_run_val} has_safety={_has_safety}")
+
         # DRY_RUN: resolve in-memory positions via price instead of oracle
-        if hasattr(self.executor, 'safety') and self.executor.safety.dry_run:
+        if _has_safety and _dry_run_val:
             self._dry_run_resolve_from_memory()
             return
 
