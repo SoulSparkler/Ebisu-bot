@@ -112,6 +112,7 @@
     },
     "rpc_config": {
       "endpoints": [
+        "https://rpc.ankr.com/polygon",
         "https://polygon-rpc.com"
       ],
       "single_request_timeout_sec": 2,
