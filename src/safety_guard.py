@@ -3,6 +3,7 @@ Safety Guard - Protection layer for real money trading
 """
 import time
 import json
+import os
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -26,7 +27,13 @@ class SafetyGuard:
         if "max_total_investment" not in safety_config:
             raise ValueError("❌ CRITICAL: 'max_total_investment' not set in config.json!")
         
-        self.dry_run = safety_config["dry_run"]
+        env_dry_run = os.environ.get("DRY_RUN", "").lower()
+        if env_dry_run == "false":
+            self.dry_run = False
+        elif env_dry_run == "true":
+            self.dry_run = True
+        else:
+            self.dry_run = safety_config["dry_run"]
         self.max_order_size_usd = safety_config["max_order_size_usd"]
         self.max_orders_per_minute = safety_config.get("max_orders_per_minute", 100)  # OK fallback
         self.max_total_investment = safety_config["max_total_investment"]

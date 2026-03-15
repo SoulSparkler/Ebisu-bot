@@ -42,12 +42,12 @@ class LateEntryStrategy:
         
         # Sizing (contracts) - time-based FROM CONFIG!
         sizing_cfg = strategy_cfg.get('sizing', {})
-        self.size_above_180 = sizing_cfg.get('above_180_sec', 8)
-        self.size_above_120 = sizing_cfg.get('above_120_sec', 10)
-        self.size_below_120 = sizing_cfg.get('below_120_sec', 12)
+        self.size_above_180 = sizing_cfg.get('above_180_sec', 4)
+        self.size_above_120 = sizing_cfg.get('above_120_sec', 4)
+        self.size_below_120 = sizing_cfg.get('below_120_sec', 4)
         
         # Max investment per market
-        self.max_investment = strategy_cfg.get('max_investment_per_market', 300)
+        self.max_investment = strategy_cfg.get('max_investment_per_market', 20)
         
         # Flip-stop price (price reversal protection)
         exit_cfg = config.get('exit', {})
@@ -264,9 +264,9 @@ class LateEntryStrategy:
             up_invested = position.get('up_invested', 0.0)
             dn_invested = position.get('down_invested', 0.0)
             current_total = up_invested + dn_invested
-            if current_total >= 12.00:
+            if current_total >= 8.00:
                 logger.info(
-                    "[POS_CAP] Position size $%.2f exceeds max $12.00 — skipping entry",
+                    "[POS_CAP] Position size $%.2f exceeds max $8.00 — skipping entry",
                     current_total,
                 )
                 return None

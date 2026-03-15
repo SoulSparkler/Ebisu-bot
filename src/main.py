@@ -161,7 +161,7 @@ wallet_balance = 0.0  # Will be set in main() after wallet check
 
 
 def validate_prices(up_ask: float, down_ask: float, up_timestamp: float, down_timestamp: float,
-                   coin: str = '', threshold_sec: float = 2.0,
+                   coin: str = '', threshold_sec: float = 7.0,
                    last_message_time: float = 0.0) -> tuple:
     """
     Validate that prices are fresh and the WebSocket connection is alive.

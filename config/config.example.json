@@ -1,9 +1,9 @@
 {
   "safety": {
     "dry_run": true,
-    "max_order_size_usd": 150.0,
+    "max_order_size_usd": 10.0,
     "max_orders_per_minute": 100,
-    "max_total_investment": 1000.0
+    "max_total_investment": 40.0
   },
   "trading": {
     "btc": {
