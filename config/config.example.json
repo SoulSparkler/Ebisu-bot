@@ -124,6 +124,11 @@
   "data_sources": {
     "polymarket": {
       "gamma_api": "https://gamma-api.polymarket.com",
+      "gamma_timeout_sec": 10,
+      "token_fetch_retry_attempts": 5,
+      "token_fetch_retry_delay_sec": 1.0,
+      "token_fetch_backoff_multiplier": 2.0,
+      "token_fetch_max_backoff_sec": 12.0,
       "ws_url": "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     }
   },

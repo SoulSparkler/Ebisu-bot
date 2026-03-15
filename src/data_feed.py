@@ -132,6 +132,17 @@ class DataFeed:
         
         # Event-driven callbacks for price updates
         self.price_callbacks = []
+
+        polymarket_cfg = self.config.get('data_sources', {}).get('polymarket', {})
+        self.gamma_api = polymarket_cfg.get('gamma_api', 'https://gamma-api.polymarket.com')
+        self.gamma_timeout_sec = float(polymarket_cfg.get('gamma_timeout_sec', 10))
+        self.token_fetch_retry_attempts = max(1, int(polymarket_cfg.get('token_fetch_retry_attempts', 5)))
+        self.token_fetch_retry_delay_sec = max(0.5, float(polymarket_cfg.get('token_fetch_retry_delay_sec', 1.0)))
+        self.token_fetch_backoff_multiplier = max(1.0, float(polymarket_cfg.get('token_fetch_backoff_multiplier', 2.0)))
+        self.token_fetch_max_backoff_sec = max(
+            self.token_fetch_retry_delay_sec,
+            float(polymarket_cfg.get('token_fetch_max_backoff_sec', 12.0))
+        )
     
     def start(self):
         """Start data streams for BTC, ETH, SOL, XRP + User Channel"""
@@ -204,53 +215,91 @@ class DataFeed:
         """Calculate current market slug for specified coin"""
         current_slot = int(time.time()) // 900 * 900
         return f"{coin}-updown-15m-{current_slot}"
+
+    def _sleep_with_stop(self, seconds: float) -> bool:
+        """Sleep in short intervals so shutdown stays responsive."""
+        end_time = time.time() + max(0.0, seconds)
+        while not self.stop_event.is_set() and time.time() < end_time:
+            time.sleep(min(0.5, end_time - time.time()))
+        return self.stop_event.is_set()
+
+    def _token_fetch_backoff_delay(self, attempt: int) -> float:
+        """Calculate exponential backoff for token discovery retries."""
+        delay = self.token_fetch_retry_delay_sec * (self.token_fetch_backoff_multiplier ** max(0, attempt - 1))
+        return min(delay, self.token_fetch_max_backoff_sec)
     
     def _fetch_tokens(self, coin: str) -> Optional[Dict]:
         """Fetch current market tokens from Polymarket for specified coin"""
-        try:
-            gamma_api = self.config['data_sources']['polymarket']['gamma_api']
-            slug = self._current_slug(coin)
-            
-            # Use events API with specific slug
-            url = f"{gamma_api}/events?slug={slug}"
-            resp = requests.get(url, timeout=10)
-            resp.raise_for_status()
-            
-            events = resp.json()
-            if not events:
-                # Market not found - may not be open yet
-                current_time = int(time.time())
-                next_market = ((current_time // 900) + 1) * 900
-                wait_time = next_market - current_time
-                print(f"[PM-{coin.upper()}] Market {slug} not found (may not be open yet, next in {wait_time}s)")
+        slug = self._current_slug(coin)
+
+        for attempt in range(1, self.token_fetch_retry_attempts + 1):
+            if self.stop_event.is_set():
                 return None
-            
-            # Get first market
-            market = events[0]["markets"][0]
-            clob_token_ids = market.get("clobTokenIds", [])
-            outcomes = market.get("outcomes", [])
-            condition_id = market.get("conditionId", "")
-            neg_risk = market.get("negRisk", True)
-            
-            # Parse if string format
-            if isinstance(clob_token_ids, str):
-                clob_token_ids = json.loads(clob_token_ids)
-            if isinstance(outcomes, str):
-                outcomes = json.loads(outcomes)
-            
-            # Find Up and Down indices
-            up_idx = outcomes.index("Up") if "Up" in outcomes else 0
-            down_idx = outcomes.index("Down") if "Down" in outcomes else 1
-            
-            return {
-                'up': clob_token_ids[up_idx],
-                'down': clob_token_ids[down_idx],
-                'condition_id': condition_id,
-                'neg_risk': neg_risk
-            }
-            
-        except Exception as e:
-            print(f"[PM-{coin.upper()}] Error fetching tokens: {e}")
+
+            try:
+                # Use events API with specific slug
+                url = f"{self.gamma_api}/events?slug={slug}"
+                resp = requests.get(url, timeout=self.gamma_timeout_sec)
+                resp.raise_for_status()
+
+                events = resp.json()
+                if not events:
+                    # Market not found - may not be open yet
+                    current_time = int(time.time())
+                    next_market = ((current_time // 900) + 1) * 900
+                    wait_time = next_market - current_time
+                    print(f"[PM-{coin.upper()}] Market {slug} not found (may not be open yet, next in {wait_time}s)")
+                    return None
+
+                event = events[0]
+                markets = event.get("markets", [])
+                if not markets:
+                    raise ValueError(f"No markets returned for slug {slug}")
+
+                market = markets[0]
+                clob_token_ids = market.get("clobTokenIds", [])
+                outcomes = market.get("outcomes", [])
+                condition_id = market.get("conditionId", "")
+                neg_risk = market.get("negRisk", True)
+
+                # Parse if string format
+                if isinstance(clob_token_ids, str):
+                    clob_token_ids = json.loads(clob_token_ids)
+                if isinstance(outcomes, str):
+                    outcomes = json.loads(outcomes)
+
+                if not isinstance(clob_token_ids, list) or len(clob_token_ids) < 2:
+                    raise ValueError(f"Invalid clobTokenIds for slug {slug}: {clob_token_ids}")
+                if not isinstance(outcomes, list) or len(outcomes) < 2:
+                    raise ValueError(f"Invalid outcomes for slug {slug}: {outcomes}")
+
+                # Find Up and Down indices
+                up_idx = outcomes.index("Up") if "Up" in outcomes else 0
+                down_idx = outcomes.index("Down") if "Down" in outcomes else 1
+                if max(up_idx, down_idx) >= len(clob_token_ids):
+                    raise ValueError(
+                        f"Outcome/token mismatch for slug {slug}: outcomes={outcomes}, tokens={clob_token_ids}"
+                    )
+
+                return {
+                    'up': clob_token_ids[up_idx],
+                    'down': clob_token_ids[down_idx],
+                    'condition_id': condition_id,
+                    'neg_risk': neg_risk
+                }
+
+            except Exception as e:
+                if attempt >= self.token_fetch_retry_attempts:
+                    print(f"[PM-{coin.upper()}] Error fetching tokens for {slug} after {attempt} attempts: {e}")
+                    return None
+
+                retry_delay = self._token_fetch_backoff_delay(attempt)
+                print(
+                    f"[PM-{coin.upper()}] Token fetch attempt {attempt}/{self.token_fetch_retry_attempts} "
+                    f"failed for {slug}: {e}. Retrying in {retry_delay:.1f}s"
+                )
+                if self._sleep_with_stop(retry_delay):
+                    return None
         return None
     
     def _polymarket_worker(self, coin: str):
@@ -259,7 +308,7 @@ class DataFeed:
             # Fetch tokens
             tokens = self._fetch_tokens(coin)
             if not tokens:
-                time.sleep(5)
+                self._sleep_with_stop(5)
                 continue
             
             with self.locks[coin]:
@@ -352,7 +401,7 @@ class DataFeed:
                 
             except Exception as e:
                 print(f"[PM-{coin.upper()}] Error: {e}")
-                time.sleep(5)
+                self._sleep_with_stop(5)
     
     def _on_pm_message(self, message: str, tokens: Dict, coin: str):
         """Parse Polymarket orderbook message for specified coin"""
