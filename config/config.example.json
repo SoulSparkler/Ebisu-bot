@@ -112,8 +112,9 @@
     },
     "rpc_config": {
       "endpoints": [
-        "https://rpc.ankr.com/polygon",
-        "https://polygon-rpc.com"
+        "https://polygon.drpc.org",
+        "https://polygon.publicnode.com",
+        "https://1rpc.io/matic"
       ],
       "single_request_timeout_sec": 10,
       "parallel_timeout_sec": 15,

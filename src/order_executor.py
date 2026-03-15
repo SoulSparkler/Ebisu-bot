@@ -23,6 +23,13 @@ import logging
 from trade_logger import log_buy_attempt, log_buy_result, log_sell_attempt, log_sell_result
 import threading
 
+DEFAULT_POLYGON_RPC_ENDPOINTS = [
+    "https://polygon.drpc.org",
+    "https://polygon.publicnode.com",
+    "https://1rpc.io/matic",
+    "https://tenderly.rpc.polygon.community",
+]
+
 # 🔥 GLOBAL: Blocked markets per-coin (race condition protection)
 # Markets in this dict CANNOT receive new buy orders (stop-loss/flip-stop active)
 # Structure: {'btc': set(), 'eth': set(), 'sol': set(), 'xrp': set()}
@@ -98,6 +105,50 @@ class OrderExecutor:
         """
         with _blocked_markets_lock:
             return coin in _blocked_markets and market_slug in _blocked_markets[coin]
+
+    @staticmethod
+    def _split_rpc_values(raw_value: str) -> list[str]:
+        """Split comma/semicolon/newline separated RPC values."""
+        if not raw_value:
+            return []
+
+        normalized = raw_value.replace(";", ",").replace("\n", ",")
+        return [value.strip() for value in normalized.split(",") if value.strip()]
+
+    def _resolve_rpc_endpoints(self) -> list[str]:
+        """
+        Resolve RPC endpoints from env + config with stable public fallbacks.
+
+        Precedence:
+        1. `RPC_URLS` / `RPC_URL` from `.env`
+        2. `execution.rpc_config.endpoints` from config
+        3. Built-in public fallbacks
+        """
+        env_endpoints = []
+        env_endpoints.extend(self._split_rpc_values(os.getenv("RPC_URLS", "")))
+        env_endpoints.extend(self._split_rpc_values(os.getenv("RPC_URL", "")))
+
+        config_endpoints = self.rpc_config.get("endpoints", [])
+        if isinstance(config_endpoints, str):
+            config_endpoints = self._split_rpc_values(config_endpoints)
+        elif not isinstance(config_endpoints, list):
+            config_endpoints = []
+
+        endpoints = env_endpoints + config_endpoints + DEFAULT_POLYGON_RPC_ENDPOINTS
+
+        deduped = []
+        seen = set()
+        for endpoint in endpoints:
+            normalized = endpoint.strip()
+            if not normalized or normalized in seen:
+                continue
+            deduped.append(normalized)
+            seen.add(normalized)
+
+        return deduped
+
+    def _default_rpc_endpoint(self) -> str:
+        return self.rpc_endpoints[0] if self.rpc_endpoints else DEFAULT_POLYGON_RPC_ENDPOINTS[0]
     
     def __init__(self, safety_guard: SafetyGuard, config: Dict, data_feed=None):
         self.safety = safety_guard
@@ -175,10 +226,9 @@ class OrderExecutor:
         # 🔥 RPC Configuration (Multiple endpoints with parallel requests)
         self.rpc_config = config.get('execution', {}).get('rpc_config', {})
         
-        # RPC endpoints (fallback to env var if not in config)
-        self.rpc_endpoints = self.rpc_config.get('endpoints', [
-            os.getenv("RPC_URL", "https://polygon-rpc.com")
-        ])
+        # RPC endpoints (env overrides config, then public fallbacks are appended)
+        self.rpc_endpoints = self._resolve_rpc_endpoints()
+        self.last_balance_error = None
         
         # RPC parameters
         self.rpc_single_timeout = self.rpc_config.get('single_request_timeout_sec', 3)
@@ -277,11 +327,13 @@ class OrderExecutor:
                 self.wallet_address = Account.from_key(self.private_key).address
             
             if not self.wallet_address:
+                self.last_balance_error = "No wallet address"
                 print("[EXECUTOR] ❌ No wallet address")
                 return None
             
-            rpc_endpoints = self.rpc_endpoints or ["https://polygon-rpc.com"]
+            rpc_endpoints = self.rpc_endpoints or DEFAULT_POLYGON_RPC_ENDPOINTS
             last_error = None
+            self.last_balance_error = None
             
             for rpc_url in rpc_endpoints:
                 try:
@@ -314,6 +366,7 @@ class OrderExecutor:
                     return total
                 except Exception as e:
                     last_error = e
+                    self.last_balance_error = str(e)
                     rpc_short = rpc_url.split('/')[2][:20] if '://' in rpc_url else rpc_url[:20]
                     print(f"[EXECUTOR] ⚠ Wallet balance RPC [{rpc_short}...] failed: {e}")
             
@@ -322,6 +375,7 @@ class OrderExecutor:
             return None
             
         except Exception as e:
+            self.last_balance_error = str(e)
             print(f"[EXECUTOR] ❌ Balance query error: {e}")
             return None
     
@@ -340,7 +394,7 @@ class OrderExecutor:
                 print("[EXECUTOR] ❌ No wallet address")
                 return None
             
-            rpc_endpoints = self.rpc_endpoints or ["https://polygon-rpc.com"]
+            rpc_endpoints = self.rpc_endpoints or DEFAULT_POLYGON_RPC_ENDPOINTS
             last_error = None
             
             for rpc_url in rpc_endpoints:
@@ -1997,7 +2051,7 @@ class OrderExecutor:
             USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
             
             # Connect to Web3 (use first RPC endpoint)
-            rpc_url = self.rpc_endpoints[0] if self.rpc_endpoints else "https://polygon-rpc.com"
+            rpc_url = self._default_rpc_endpoint()
             w3 = Web3(Web3.HTTPProvider(rpc_url))
             if not w3.is_connected():
                 print(f"[REDEEM] ❌ Cannot connect to RPC")
@@ -2112,7 +2166,7 @@ class OrderExecutor:
             USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
             
             # Connect to Web3 (use first RPC endpoint)
-            rpc_url = self.rpc_endpoints[0] if self.rpc_endpoints else "https://polygon-rpc.com"
+            rpc_url = self._default_rpc_endpoint()
             w3 = Web3(Web3.HTTPProvider(rpc_url))
             if not w3.is_connected():
                 print(f"[REDEEM] ❌ Cannot connect to RPC")

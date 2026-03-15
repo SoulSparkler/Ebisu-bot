@@ -340,10 +340,22 @@ def main():
         print("\n[WALLET] Checking wallet balance...")
         wallet_balance = order_executor.get_wallet_usdc_balance()
         
-        if not wallet_balance or wallet_balance <= 0:
+        if wallet_balance is None:
             print("\n" + "="*80)
-            print("❌ ERROR: Cannot read wallet balance or balance is 0!")
-            print("   Check your PRIVATE_KEY in .env and ensure wallet has USDC")
+            print("❌ ERROR: Cannot read wallet balance!")
+            print("   Check RPC_URLS/RPC_URL in .env or execution.rpc_config.endpoints in config/config.json")
+            if getattr(order_executor, "last_balance_error", None):
+                print(f"   Last RPC error: {order_executor.last_balance_error}")
+            print(f"   Wallet address: {order_executor.wallet_address}")
+            print("   If you use a private RPC provider, make sure the API key is included in the URL")
+            print("="*80)
+            sys.exit(1)
+        
+        if wallet_balance <= 0:
+            print("\n" + "="*80)
+            print("❌ ERROR: Wallet balance is 0 USDC!")
+            print("   Check your PRIVATE_KEY in .env and ensure the wallet holds Polygon USDC")
+            print(f"   Wallet address: {order_executor.wallet_address}")
             print("="*80)
             sys.exit(1)
         

@@ -94,7 +94,9 @@ nano config/config.json
 PRIVATE_KEY=0x...your_private_key...
 
 # Polygon Network
-RPC_URL=https://polygon-rpc.com
+RPC_URLS=https://polygon.drpc.org,https://polygon.publicnode.com,https://1rpc.io/matic
+# Optional single-provider override:
+# RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/YOUR_API_KEY
 CHAIN_ID=137
 
 # Polymarket API (REQUIRED)
@@ -225,6 +227,17 @@ Use a private RPC endpoint:
 ```env
 RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/YOUR_API_KEY
 ```
+
+### "401 Unauthorized" from Polygon RPC
+
+Legacy public endpoints like `https://polygon-rpc.com` and `https://rpc.ankr.com/polygon`
+can require authentication now. Use current public fallbacks or your own provider:
+
+```env
+RPC_URLS=https://polygon.drpc.org,https://polygon.publicnode.com,https://1rpc.io/matic
+```
+
+`.env` RPC settings now override `config/config.json`, so you can fix RPCs without editing JSON.
 
 ### "Invalid signature"
 
