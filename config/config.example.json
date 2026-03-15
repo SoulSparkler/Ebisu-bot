@@ -115,8 +115,8 @@
         "https://rpc.ankr.com/polygon",
         "https://polygon-rpc.com"
       ],
-      "single_request_timeout_sec": 2,
-      "parallel_timeout_sec": 3,
+      "single_request_timeout_sec": 10,
+      "parallel_timeout_sec": 15,
       "retry_attempts": 10,
       "retry_delay_sec": 0.3,
       "enable_parallel_requests": true
