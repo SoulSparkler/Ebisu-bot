@@ -284,9 +284,7 @@ class OrderExecutor:
             rpc_url = self.rpc_endpoints[0] if self.rpc_endpoints else "https://polygon-rpc.com"
             w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': self.rpc_single_timeout}))
             
-            if not w3.is_connected():
-                print("[EXECUTOR] ⚠ Cannot connect to RPC")
-                return None
+            # Skip is_connected() check - just try the query directly
             
             total = 0.0
             
