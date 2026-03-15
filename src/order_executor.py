@@ -280,34 +280,46 @@ class OrderExecutor:
                 print("[EXECUTOR] ❌ No wallet address")
                 return None
             
-            # Use first RPC endpoint for wallet balance queries
-            rpc_url = self.rpc_endpoints[0] if self.rpc_endpoints else "https://polygon-rpc.com"
-            w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': self.rpc_single_timeout}))
+            rpc_endpoints = self.rpc_endpoints or ["https://polygon-rpc.com"]
+            last_error = None
             
-            # Skip is_connected() check - just try the query directly
+            for rpc_url in rpc_endpoints:
+                try:
+                    w3 = Web3(Web3.HTTPProvider(
+                        rpc_url,
+                        request_kwargs={'timeout': self.rpc_single_timeout}
+                    ))
+                    
+                    total = 0.0
+                    
+                    # USDC.e (bridged) - main Polymarket token
+                    usdc_e = w3.eth.contract(
+                        address=Web3.to_checksum_address(self.USDC_BRIDGED), 
+                        abi=self.ERC20_ABI
+                    )
+                    balance_e = usdc_e.functions.balanceOf(self.wallet_address).call()
+                    decimals_e = usdc_e.functions.decimals().call()
+                    total += balance_e / (10 ** decimals_e)
+                    
+                    # Native USDC
+                    usdc_n = w3.eth.contract(
+                        address=Web3.to_checksum_address(self.USDC_NATIVE), 
+                        abi=self.ERC20_ABI
+                    )
+                    balance_n = usdc_n.functions.balanceOf(self.wallet_address).call()
+                    decimals_n = usdc_n.functions.decimals().call()
+                    total += balance_n / (10 ** decimals_n)
+                    
+                    print(f"[EXECUTOR] Wallet balance: ${total:.2f}")
+                    return total
+                except Exception as e:
+                    last_error = e
+                    rpc_short = rpc_url.split('/')[2][:20] if '://' in rpc_url else rpc_url[:20]
+                    print(f"[EXECUTOR] ⚠ Wallet balance RPC [{rpc_short}...] failed: {e}")
             
-            total = 0.0
-            
-            # USDC.e (bridged) - main Polymarket token
-            usdc_e = w3.eth.contract(
-                address=Web3.to_checksum_address(self.USDC_BRIDGED), 
-                abi=self.ERC20_ABI
-            )
-            balance_e = usdc_e.functions.balanceOf(self.wallet_address).call()
-            decimals_e = usdc_e.functions.decimals().call()
-            total += balance_e / (10 ** decimals_e)
-            
-            # Native USDC
-            usdc_n = w3.eth.contract(
-                address=Web3.to_checksum_address(self.USDC_NATIVE), 
-                abi=self.ERC20_ABI
-            )
-            balance_n = usdc_n.functions.balanceOf(self.wallet_address).call()
-            decimals_n = usdc_n.functions.decimals().call()
-            total += balance_n / (10 ** decimals_n)
-            
-            print(f"[EXECUTOR] Wallet balance: ${total:.2f}")
-            return total
+            if last_error is not None:
+                print(f"[EXECUTOR] ❌ Balance query error: {last_error}")
+            return None
             
         except Exception as e:
             print(f"[EXECUTOR] ❌ Balance query error: {e}")
@@ -328,21 +340,31 @@ class OrderExecutor:
                 print("[EXECUTOR] ❌ No wallet address")
                 return None
             
-            # Use first RPC endpoint for wallet balance queries
-            rpc_url = self.rpc_endpoints[0] if self.rpc_endpoints else "https://polygon-rpc.com"
-            w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': self.rpc_single_timeout}))
+            rpc_endpoints = self.rpc_endpoints or ["https://polygon-rpc.com"]
+            last_error = None
             
-            if not w3.is_connected():
-                print("[EXECUTOR] ⚠ Cannot connect to RPC")
-                return None
+            for rpc_url in rpc_endpoints:
+                try:
+                    w3 = Web3(Web3.HTTPProvider(
+                        rpc_url,
+                        request_kwargs={'timeout': self.rpc_single_timeout}
+                    ))
+                    
+                    # Get native balance (in Wei)
+                    balance_wei = w3.eth.get_balance(self.wallet_address)
+                    # Convert to POL (1 POL = 10^18 Wei)
+                    balance_pol = balance_wei / 1e18
+                    
+                    print(f"[EXECUTOR] POL balance: {balance_pol:.4f}")
+                    return balance_pol
+                except Exception as e:
+                    last_error = e
+                    rpc_short = rpc_url.split('/')[2][:20] if '://' in rpc_url else rpc_url[:20]
+                    print(f"[EXECUTOR] ⚠ POL balance RPC [{rpc_short}...] failed: {e}")
             
-            # Get native balance (in Wei)
-            balance_wei = w3.eth.get_balance(self.wallet_address)
-            # Convert to POL (1 POL = 10^18 Wei)
-            balance_pol = balance_wei / 1e18
-            
-            print(f"[EXECUTOR] POL balance: {balance_pol:.4f}")
-            return balance_pol
+            if last_error is not None:
+                print(f"[EXECUTOR] ❌ POL balance query error: {last_error}")
+            return None
             
         except Exception as e:
             print(f"[EXECUTOR] ❌ POL balance query error: {e}")
