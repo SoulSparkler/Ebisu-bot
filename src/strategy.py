@@ -72,7 +72,7 @@ class LateEntryStrategy:
         simple_pair_cost = up_ask + down_ask
 
         if simple_pair_cost >= self.pair_cost_ceiling:
-            logger.debug(
+            logger.info(
                 "PAIR_COST_BLOCKED simple_pair=%.4f ceiling=%.4f "
                 "ask_up=%.3f ask_down=%.3f",
                 simple_pair_cost, self.pair_cost_ceiling,
