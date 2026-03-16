@@ -185,7 +185,9 @@ class OrderExecutor:
                 else:
                     if not funder_address:
                         raise ValueError(f"SIGNATURE_TYPE={signature_type} requires FUNDER_ADDRESS in .env")
-                    self.wallet_address = funder_address
+                    # Use PROXY_WALLET for balance checks if set (funds may be deposited directly there)
+                    proxy_wallet = os.getenv("PROXY_WALLET", "")
+                    self.wallet_address = proxy_wallet if proxy_wallet else funder_address
                     wallet_type = f"Proxy (type {signature_type})"
                 
                 host = os.getenv("CLOB_HOST", "https://clob.polymarket.com")
