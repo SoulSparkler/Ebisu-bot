@@ -60,6 +60,9 @@ class LateEntryStrategy:
         # Track last entry per market
         self.last_entry = {}
         self.last_favorite = {}
+
+        # Tick counter for periodic pair-cost logging
+        self._tick_count = 0
     
     def _pair_cost_ok(self, up_ask: float, down_ask: float) -> bool:
         """
@@ -70,6 +73,14 @@ class LateEntryStrategy:
             return False  # Can't assess — don't trade
 
         simple_pair_cost = up_ask + down_ask
+        self._tick_count += 1
+
+        if self._tick_count % 50 == 0:
+            logger.info(
+                "[PAIR_COST_TICK] tick=%d pair=%.4f ceiling=%.4f up=%.3f dn=%.3f",
+                self._tick_count, simple_pair_cost, self.pair_cost_ceiling,
+                up_ask, down_ask,
+            )
 
         if simple_pair_cost >= self.pair_cost_ceiling:
             logger.info(
