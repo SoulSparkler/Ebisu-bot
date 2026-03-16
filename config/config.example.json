@@ -1,6 +1,6 @@
 {
   "safety": {
-    "dry_run": true,
+    "dry_run": false,
     "max_order_size_usd": 10.0,
     "max_orders_per_minute": 100,
     "max_total_investment": 40.0
