@@ -11,6 +11,7 @@ import sys
 import subprocess
 import os
 import threading
+import logging
 import requests
 from pathlib import Path
 from typing import Dict
@@ -27,6 +28,8 @@ from safety_guard import SafetyGuard
 from order_executor import OrderExecutor
 from keyboard_listener import KeyboardListener
 import trader as trader_module
+
+logger = logging.getLogger("ebisu.main")
 
 
 # Global configuration constants
@@ -1847,6 +1850,11 @@ def main():
                         continue
 
                     # Generate signal with current market state
+                    logger.info(
+                        "[PRE_ENTRY] coin=%s market=%s up=%.3f dn=%.3f pair=%.3f stc=%d",
+                        coin, market_slug, up_ask, down_ask, up_ask + down_ask,
+                        market_state.get('seconds_till_end', 0)
+                    )
                     signal = strategy.should_enter(market_state, position_stats)
 
                     # Paper tracker: record first prediction per window (regardless of entry)
