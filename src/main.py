@@ -1850,10 +1850,11 @@ def main():
                         continue
 
                     # Generate signal with current market state
-                    logger.info(
-                        "[PRE_ENTRY] coin=%s market=%s up=%.3f dn=%.3f pair=%.3f stc=%d",
-                        coin, market_slug, up_ask, down_ask, up_ask + down_ask,
-                        market_state.get('seconds_till_end', 0)
+                    print(
+                        f"[PRE_ENTRY] coin={coin} market={market_slug} "
+                        f"up={up_ask:.3f} dn={down_ask:.3f} "
+                        f"pair={up_ask + down_ask:.3f} "
+                        f"stc={market_state.get('seconds_till_end', 0)}"
                     )
                     signal = strategy.should_enter(market_state, position_stats)
 
