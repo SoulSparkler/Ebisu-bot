@@ -8,13 +8,22 @@ import requests
 from datetime import timedelta
 from threading import Thread, Lock
 from queue import Queue, Empty
-from typing import Dict
+from typing import Dict, Optional
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 from pathlib import Path as _Path
 _env_path = _Path(__file__).parent.parent / ".env"
 load_dotenv(str(_env_path))
+
+
+def _first_env(*names: str) -> str:
+    """Return the first non-empty environment variable from a list of names."""
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
 
 
 class TelegramNotifier:
@@ -39,10 +48,20 @@ class TelegramNotifier:
             rate_limit: Max messages per second (default: 2)
             event_callback: Callback function(message, event_type) for logging events
         """
-        # Get from env if not provided
-        self.bot_token = bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "")
-        self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
+        # Get from env if not provided. Legacy Railway names are accepted so
+        # older deployments can still answer /start and show the missing chat ID.
+        self.bot_token = (bot_token or _first_env(
+            "TELEGRAM_BOT_TOKEN",
+            "bottoken",
+            "BOT_TOKEN",
+        )).strip()
+        self.chat_id = (chat_id or _first_env(
+            "TELEGRAM_CHAT_ID",
+            "chatid",
+            "CHAT_ID",
+        )).strip()
         self.event_callback = event_callback
+        self.has_bot_token = bool(self.bot_token)
         
         # Configuration
         self.rate_limit = rate_limit
@@ -52,7 +71,8 @@ class TelegramNotifier:
         # Queue for messages
         self.queue = Queue(maxsize=30)  # Small queue - only market notifications
         self.running = True
-        self.enabled = bool(self.bot_token and self.chat_id)
+        self.enabled = bool(self.has_bot_token and self.chat_id)
+        self.thread = None
         
         # Statistics
         self.dropped_count = 0
@@ -71,7 +91,21 @@ class TelegramNotifier:
                 self.event_callback("Notifier started", 'telegram')
         else:
             if self.event_callback:
-                self.event_callback("Telegram disabled (no credentials)", 'info')
+                if self.has_bot_token:
+                    self.event_callback("Telegram setup mode (missing TELEGRAM_CHAT_ID)", 'info')
+                else:
+                    self.event_callback("Telegram disabled (missing TELEGRAM_BOT_TOKEN)", 'info')
+
+    def _build_setup_message(self, chat_id: str) -> str:
+        """Explain the missing Railway variable and show the user's chat ID."""
+        return (
+            "<b>Telegram setup required</b>\n\n"
+            "The bot token is configured, but <code>TELEGRAM_CHAT_ID</code> is missing.\n\n"
+            f"Your current chat ID is:\n<code>{chat_id}</code>\n\n"
+            "Add this Railway variable and redeploy:\n"
+            f"<code>TELEGRAM_CHAT_ID={chat_id}</code>\n\n"
+            "After the deploy finishes, send /start again."
+        )
     
     def _worker(self):
         """Background worker that sends messages from queue"""
@@ -323,9 +357,9 @@ Winner: {winner}"""
             on_shutdown_callbacks: Dict with callback functions for shutdown buttons
                                    {'shutdown_confirm': func, 'shutdown_cancel': func}
         """
-        if not self.enabled:
+        if not self.has_bot_token:
             if self.event_callback:
-                self.event_callback("Command listener disabled", 'info')
+                self.event_callback("Command listener disabled (missing TELEGRAM_BOT_TOKEN)", 'info')
             return None
         
         def listener_thread():
@@ -334,7 +368,10 @@ Winner: {winner}"""
             max_consecutive_errors = 10
             
             if self.event_callback:
-                self.event_callback("Command listener started", 'telegram')
+                if self.chat_id:
+                    self.event_callback("Command listener started", 'telegram')
+                else:
+                    self.event_callback("Command listener started in setup mode", 'info')
             
             while self.running:
                 try:
@@ -427,6 +464,19 @@ Winner: {winner}"""
                             from_chat_id = str(message['chat']['id'])
                             from_user = message.get('from', {}).get('username', 'unknown')
                             
+                            if not self.chat_id:
+                                if text.startswith('/'):
+                                    if self.event_callback:
+                                        self.event_callback(
+                                            f"Telegram setup request from {from_user} ({from_chat_id})",
+                                            'telegram'
+                                        )
+                                    self.send_message(
+                                        self._build_setup_message(from_chat_id),
+                                        chat_id=from_chat_id
+                                    )
+                                continue
+
                             # SECURITY: Only respond to messages from our chat_id
                             if from_chat_id != self.chat_id:
                                 if self.event_callback:
@@ -721,7 +771,7 @@ Winner: {winner}"""
             print(f"[TELEGRAM] ⚠️ Error answering callback: {e}")
             return False
     
-    def send_message(self, message: str):
+    def send_message(self, message: str, chat_id: Optional[str] = None):
         """
         Send plain text message to Telegram (for command responses)
         Sends directly (not queued) since this is for immediate command responses
@@ -729,14 +779,15 @@ Winner: {winner}"""
         Args:
             message: Text message to send
         """
-        if not self.enabled:
+        target_chat_id = str(chat_id or self.chat_id or "").strip()
+        if not self.has_bot_token or not target_chat_id:
             return False
         
         # Send directly for immediate response (not queued)
         try:
             url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
             data = {
-                'chat_id': self.chat_id,
+                'chat_id': target_chat_id,
                 'text': message,
                 'parse_mode': 'HTML',
                 'disable_web_page_preview': True

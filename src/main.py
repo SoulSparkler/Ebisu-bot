@@ -1200,7 +1200,10 @@ def main():
             on_showparams_command=handle_showparams_command,
             on_showlogs_command=handle_showlogs_command,
         )
-        dashboard.add_event("Command listener active (/chart, /b, /t, /r, /off)", 'success')
+        if notifier.chat_id:
+            dashboard.add_event("Command listener active (/chart, /b, /t, /r, /off)", 'success')
+        else:
+            dashboard.add_event("Command listener in setup mode. Send /start to get TELEGRAM_CHAT_ID.", 'info')
     except Exception as e:
         dashboard.add_event(f"Listener failed: {str(e)[:40]}", 'error')
         dashboard.add_event("Bot continues without commands", 'info')

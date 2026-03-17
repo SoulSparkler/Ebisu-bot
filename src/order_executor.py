@@ -1979,8 +1979,16 @@ class OrderExecutor:
         """
         print(f"[EXECUTOR] [TELEGRAM] {message[:100]}...")  # Debug
         try:
-            token = os.getenv("TELEGRAM_BOT_TOKEN")
-            chat_id = os.getenv("TELEGRAM_CHAT_ID")
+            token = (
+                os.getenv("TELEGRAM_BOT_TOKEN")
+                or os.getenv("bottoken")
+                or os.getenv("BOT_TOKEN")
+            )
+            chat_id = (
+                os.getenv("TELEGRAM_CHAT_ID")
+                or os.getenv("chatid")
+                or os.getenv("CHAT_ID")
+            )
             
             if not token or not chat_id:
                 return
@@ -2086,8 +2094,16 @@ class OrderExecutor:
         Used for CRITICAL errors (failed to sell everything)
         """
         try:
-            token = os.getenv("TELEGRAM_BOT_TOKEN")
-            chat_id = os.getenv("TELEGRAM_CHAT_ID")
+            token = (
+                os.getenv("TELEGRAM_BOT_TOKEN")
+                or os.getenv("bottoken")
+                or os.getenv("BOT_TOKEN")
+            )
+            chat_id = (
+                os.getenv("TELEGRAM_CHAT_ID")
+                or os.getenv("chatid")
+                or os.getenv("CHAT_ID")
+            )
             
             if not token or not chat_id:
                 # No Telegram configuration - silent fail
