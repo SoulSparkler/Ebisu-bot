@@ -29,6 +29,12 @@ from order_executor import OrderExecutor
 from keyboard_listener import KeyboardListener
 import trader as trader_module
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(message)s',
+    handlers=[logging.StreamHandler()]
+)
+
 logger = logging.getLogger("ebisu.main")
 
 
@@ -37,6 +43,7 @@ STRATEGY_BASES = ['late_v3']
 # BTC/ETH disabled — pair costs rarely dip below $0.99 (0.1% and 1.2% of samples)
 # XRP: 2.3% of samples below $0.99, SOL: 1.5%
 COINS = ['sol', 'xrp']
+LOG_THROTTLE_SECONDS = 30
 
 # Global stop flag
 stop_flag = False
@@ -410,6 +417,10 @@ def main():
 
     # Pair-cost floor measurement: {coin: {market_slug: {stats}}}
     pair_cost_stats = {coin: {} for coin in COINS}
+    debug_log_times = {
+        coin: {'window_check': 0.0, 'switch_debug': 0.0}
+        for coin in COINS
+    }
 
     # Initialize multi-trader (unified wallet - no capital distribution)
     global multi_trader_instance
@@ -2024,10 +2035,13 @@ def main():
                     continue
 
                 seconds_till_end = market_state.get('seconds_till_end', 0)
-                print(
-                    f"[WINDOW_CHECK] market={market_slug} time_remaining={seconds_till_end} "
-                    f"coin={coin} tracked={len(market_start_prices.get(coin, {}))}"
-                )
+                debug_now = time.time()
+                if debug_now - debug_log_times[coin]['window_check'] >= LOG_THROTTLE_SECONDS:
+                    print(
+                        f"[WINDOW_CHECK] market={market_slug} time_remaining={seconds_till_end} "
+                        f"coin={coin} tracked={len(market_start_prices.get(coin, {}))}"
+                    )
+                    debug_log_times[coin]['window_check'] = debug_now
                 
                 # STEP 1: Check for market switch FIRST
                 _up_ask_dbg = market_state.get('up_ask', 0)
@@ -2035,11 +2049,13 @@ def main():
                 _strat_dbg = f"{STRATEGY_BASES[0]}_{coin}"
                 _ps_dbg = multi_trader.get_market_stats(_strat_dbg, market_slug, _up_ask_dbg, _down_ask_dbg)
                 _pos_val_dbg = _ps_dbg.get('total_invested', 0) if _ps_dbg else 0
-                print(
-                    f"[SWITCH_DEBUG] coin={coin} slug={market_slug} time_remaining={seconds_till_end} "
-                    f"position_value=${_pos_val_dbg:.2f} up_price={_up_ask_dbg:.3f} "
-                    f"tracked_keys={list(market_start_prices[coin].keys())}"
-                )
+                if debug_now - debug_log_times[coin]['switch_debug'] >= LOG_THROTTLE_SECONDS:
+                    print(
+                        f"[SWITCH_DEBUG] coin={coin} slug={market_slug} time_remaining={seconds_till_end} "
+                        f"position_value=${_pos_val_dbg:.2f} up_price={_up_ask_dbg:.3f} "
+                        f"tracked_keys={list(market_start_prices[coin].keys())}"
+                    )
+                    debug_log_times[coin]['switch_debug'] = debug_now
                 for prev_market in list(market_start_prices[coin].keys()):
                     if prev_market != market_slug and prev_market != "":
                         # Market switch detected!
