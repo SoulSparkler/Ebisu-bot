@@ -2254,6 +2254,7 @@ class OrderExecutor:
             print(f"  Oracle resolved: {winner} won!")
             
             # Build redeem transaction
+            redeem_from_address = Account.from_key(self.private_key).address
             nonce = w3.eth.get_transaction_count(self.wallet_address)
             gas_price = w3.eth.gas_price
             
@@ -2268,7 +2269,7 @@ class OrderExecutor:
                     [up_balance, down_balance]
                 ).build_transaction({
                     "chainId": 137,
-                    "from": self.wallet_address,
+                    "from": redeem_from_address,
                     "nonce": nonce,
                     "gas": gas_limit,
                     "gasPrice": int(gas_price * gas_multiplier),
@@ -2282,7 +2283,7 @@ class OrderExecutor:
                     [1, 2]  # index_sets
                 ).build_transaction({
                     "chainId": 137,
-                    "from": self.wallet_address,
+                    "from": redeem_from_address,
                     "nonce": nonce,
                     "gas": gas_limit,
                     "gasPrice": int(gas_price * gas_multiplier),
@@ -2396,7 +2397,7 @@ class OrderExecutor:
                                     [up_balance, down_balance]
                                 ).build_transaction({
                                     "chainId": 137,
-                                    "from": self.wallet_address,
+                                    "from": redeem_from_address,
                                     "nonce": nonce,
                                     "gas": gas_limit,
                                     "gasPrice": int(gas_price * gas_multiplier),
@@ -2409,7 +2410,7 @@ class OrderExecutor:
                                     [1, 2]
                                 ).build_transaction({
                                     "chainId": 137,
-                                    "from": self.wallet_address,
+                                    "from": redeem_from_address,
                                     "nonce": nonce,
                                     "gas": gas_limit,
                                     "gasPrice": int(gas_price * gas_multiplier),
