@@ -6,6 +6,7 @@ import json
 import threading
 from typing import Dict, List, Optional
 from pathlib import Path
+import requests
 from db import save_trade, load_trades_for_strategy, save_market_metadata, load_all_market_metadata
 
 
@@ -14,6 +15,7 @@ _order_executor = None
 _data_feed = None  # ✅ For access to position_tracker (REAL data!)
 _token_ids_cache = {}  # {market_slug: {'UP': token_id, 'DOWN': token_id}}
 _market_metadata_cache = {}  # {market_slug: {'condition_id': str, 'neg_risk': bool}}
+_gamma_api = "https://gamma-api.polymarket.com"
 
 
 def set_order_executor(executor):
@@ -89,6 +91,75 @@ def get_token_ids(market_slug: str) -> dict:
 def get_market_metadata(market_slug: str) -> dict:
     """Get metadata (condition_id, neg_risk) for market"""
     return _market_metadata_cache.get(market_slug, {})
+
+
+def refresh_market_metadata(market_slug: str, timeout_sec: int = 10) -> dict:
+    """
+    Recover token IDs and redeem metadata directly from Gamma.
+
+    This is used by the redeem flow after restart or cache loss.
+    """
+    try:
+        url = f"{_gamma_api}/markets?slug={market_slug}"
+        resp = requests.get(url, timeout=timeout_sec)
+        resp.raise_for_status()
+
+        markets = resp.json()
+        if not markets:
+            print(f"[TRADER] ⚠️ Gamma returned no market for slug {market_slug}")
+            return {}
+
+        market = markets[0]
+        clob_token_ids = market.get("clobTokenIds", [])
+        outcomes = market.get("outcomes", [])
+        condition_id = market.get("conditionId", "")
+        neg_risk = market.get("negRisk")
+
+        if isinstance(clob_token_ids, str):
+            clob_token_ids = json.loads(clob_token_ids)
+        if isinstance(outcomes, str):
+            outcomes = json.loads(outcomes)
+
+        if not isinstance(clob_token_ids, list) or len(clob_token_ids) < 2:
+            raise ValueError(f"Invalid clobTokenIds for slug {market_slug}: {clob_token_ids}")
+        if not isinstance(outcomes, list) or len(outcomes) < 2:
+            raise ValueError(f"Invalid outcomes for slug {market_slug}: {outcomes}")
+
+        up_idx = outcomes.index("Up") if "Up" in outcomes else 0
+        down_idx = outcomes.index("Down") if "Down" in outcomes else 1
+        if max(up_idx, down_idx) >= len(clob_token_ids):
+            raise ValueError(
+                f"Outcome/token mismatch for slug {market_slug}: outcomes={outcomes}, tokens={clob_token_ids}"
+            )
+
+        if neg_risk is None:
+            neg_risk = False
+
+        set_token_ids(
+            market_slug=market_slug,
+            up_token_id=clob_token_ids[up_idx],
+            down_token_id=clob_token_ids[down_idx],
+            condition_id=condition_id,
+            neg_risk=neg_risk,
+        )
+
+        print(
+            f"[TRADER] ✅ Refreshed metadata for {market_slug} "
+            f"(neg_risk={neg_risk}, condition_id={'yes' if condition_id else 'no'})"
+        )
+        return {
+            'token_ids': {
+                'UP': clob_token_ids[up_idx],
+                'DOWN': clob_token_ids[down_idx],
+            },
+            'metadata': {
+                'condition_id': condition_id,
+                'neg_risk': neg_risk,
+            },
+        }
+    except Exception as e:
+        print(f"[TRADER] ⚠️ Failed to refresh metadata for {market_slug}: {e}")
+        return {}
 
 
 class Trader:

@@ -50,6 +50,7 @@ stop_flag = False
 data_feed = None
 multi_trader_instance = None  # Will hold MultiTrader for graceful shutdown
 keyboard_listener = None  # Will hold KeyboardListener for cleanup
+redeem_collector = None  # Shared so manual triggers and shutdown can access collector
 
 # Global redeem positions cache for Telegram /r command
 redeem_positions_cache = []
@@ -58,7 +59,7 @@ redeem_cache_lock = threading.Lock()
 
 def signal_handler(sig, frame):
     """Handle Ctrl+C gracefully"""
-    global stop_flag, data_feed, multi_trader_instance, keyboard_listener
+    global stop_flag, data_feed, multi_trader_instance, keyboard_listener, redeem_collector
     print("\n[SYSTEM] Shutdown signal received, stopping...")
     stop_flag = True
     
@@ -72,6 +73,10 @@ def signal_handler(sig, frame):
         print("[DATA] Stopping feeds...")
         data_feed.stop()
         print("[DATA] Feeds stopped")
+
+    if redeem_collector:
+        print("[REDEEM COLLECTOR] Stopping...")
+        redeem_collector.stop()
     
     # Save all active positions before exit
     if multi_trader_instance:
@@ -212,13 +217,24 @@ def validate_prices(up_ask: float, down_ask: float, up_timestamp: float, down_ti
 
 def run_manual_redeem():
     """Callback for manual redeem (M key)"""
-    print("[REDEEM] Manual keyboard redeem not supported on Railway")
-    print("[REDEEM] Use /r command in Telegram instead")
+    global redeem_collector
+
+    if not redeem_collector:
+        print("[REDEEM] Manual redeem unavailable: collector not initialized")
+        print("[REDEEM] Use /r in Telegram or check collector startup logs")
+        return
+
+    print("[REDEEM] Manual redeem requested")
+    started = redeem_collector.trigger_manual_check(source="KEYBOARD")
+    if started:
+        print("[REDEEM] Manual redeem scan started in background")
+    else:
+        print("[REDEEM] Manual redeem skipped because another redeem cycle is already running")
 
 
 def main():
     """Main trading loop"""
-    global stop_flag, data_feed, wallet_balance, keyboard_listener
+    global stop_flag, data_feed, wallet_balance, keyboard_listener, redeem_collector
 
     from pathlib import Path
     Path("logs").mkdir(exist_ok=True)
@@ -850,6 +866,10 @@ def main():
         try:
             print("\n[TELEGRAM CMD] 💰 Getting redeemable positions...")
             
+            if redeem_collector is None:
+                notifier.send_message("❌ Redeem collector is not active on this bot instance")
+                return
+
             # Use existing method from SimpleRedeemCollector
             positions = redeem_collector._fetch_redeemable_positions()
             
@@ -925,6 +945,10 @@ def main():
         global redeem_positions_cache
         
         try:
+            if redeem_collector is None:
+                notifier.answer_callback_query(callback_id, "❌ Redeem collector inactive", show_alert=True)
+                return
+
             # Get positions from cache (thread-safe)
             with redeem_cache_lock:
                 positions = redeem_positions_cache.copy()
@@ -990,6 +1014,10 @@ def main():
         global redeem_positions_cache
         
         try:
+            if redeem_collector is None:
+                notifier.answer_callback_query(callback_id, "❌ Redeem collector inactive", show_alert=True)
+                return
+
             # Get positions from cache (thread-safe)
             with redeem_cache_lock:
                 positions = redeem_positions_cache.copy()

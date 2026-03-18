@@ -3,6 +3,7 @@ Simple Redeem Collector
 Periodically collects all unredeemed positions via Polymarket API
 Simple replacement for complex system pending_markets
 """
+import os
 import time
 import threading
 import requests
@@ -60,6 +61,7 @@ class SimpleRedeemCollector:
             'total_redeemed': 0,
             'startup_check_done': False
         }
+        self._check_lock = threading.Lock()
         
         print(f"[REDEEM COLLECTOR] Initialized:")
         print(f"  Wallet: {wallet_address[:10]}...{wallet_address[-8:]}")
@@ -87,6 +89,104 @@ class SimpleRedeemCollector:
         if hasattr(self, 'thread') and self.thread:
             self.thread.join(timeout=5)
         print(f"[REDEEM COLLECTOR] Stopped")
+
+    def trigger_manual_check(self, source: str = "MANUAL") -> bool:
+        """Kick off an out-of-band redeem scan without blocking the caller."""
+        if self._check_lock.locked():
+            print(f"[REDEEM COLLECTOR] Manual check skipped ({source}): another cycle is already running")
+            return False
+
+        worker = threading.Thread(
+            target=self._check_and_redeem_all,
+            kwargs={'check_type': source},
+            daemon=True,
+            name=f"RedeemCheck-{source}"
+        )
+        worker.start()
+        print(f"[REDEEM COLLECTOR] Manual check queued ({source})")
+        return True
+
+    def _wallet_candidates(self) -> List[str]:
+        """Collect plausible wallet addresses for the positions API."""
+        candidates = []
+        client = getattr(self.executor, 'client', None)
+        creds = getattr(client, 'creds', None)
+
+        for candidate in (
+            self.wallet,
+            getattr(self.executor, 'wallet_address', None),
+            getattr(creds, 'address', None),
+            os.getenv('PROXY_WALLET'),
+            os.getenv('FUNDER_ADDRESS'),
+        ):
+            if not isinstance(candidate, str):
+                continue
+            normalized = candidate.strip()
+            if normalized and normalized not in candidates:
+                candidates.append(normalized)
+
+        return candidates
+
+    def _fetch_redeemable_positions_for_wallet(self, wallet: str) -> Optional[List[Dict]]:
+        """Query Polymarket API to get redeemable positions for one wallet."""
+        url = "https://data-api.polymarket.com/positions"
+        params = {
+            'user': wallet,
+            'redeemable': 'true',
+            'sizeThreshold': self.size_threshold,
+            'limit': 500
+        }
+
+        print(f"[REDEEM COLLECTOR] Requesting Polymarket API for {wallet[:10]}...{wallet[-8:]}")
+        print(f"  URL: {url}")
+        print(f"  Filter: redeemable=true, sizeThreshold={self.size_threshold}")
+
+        for attempt in range(1, self.api_max_retries + 1):
+            try:
+                response = requests.get(url, params=params, timeout=self.api_timeout)
+
+                if response.status_code == 200:
+                    positions = response.json()
+                    print(f"[REDEEM COLLECTOR] ✓ API response for {wallet[:10]}...{wallet[-8:]}: {len(positions)} position(s)")
+                    return positions
+
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get('Retry-After', self.api_retry_delay))
+                    print(f"[REDEEM COLLECTOR] ⚠️ Rate limit hit (429) for {wallet[:10]}...{wallet[-8:]}")
+                    print(f"[REDEEM COLLECTOR]    Retry-After: {retry_after}s")
+
+                    if attempt < self.api_max_retries:
+                        print(f"[REDEEM COLLECTOR]    Waiting {retry_after}s before retry...")
+                        time.sleep(retry_after)
+                        continue
+
+                    print(f"[REDEEM COLLECTOR] ❌ Rate limit persists after {self.api_max_retries} attempts")
+                    return None
+
+                print(f"[REDEEM COLLECTOR] ❌ API error for {wallet[:10]}...{wallet[-8:]}: {response.status_code}")
+                print(f"  Response: {response.text[:200]}")
+
+                if attempt < self.api_max_retries:
+                    wait_time = 5 * attempt
+                    print(f"[REDEEM COLLECTOR]    Retry {attempt}/{self.api_max_retries} in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+
+                return None
+
+            except requests.exceptions.Timeout:
+                print(f"[REDEEM COLLECTOR] ⚠️ Request timeout for {wallet[:10]}...{wallet[-8:]} (attempt {attempt})")
+                if attempt < self.api_max_retries:
+                    time.sleep(5)
+                    continue
+
+            except Exception as e:
+                print(f"[REDEEM COLLECTOR] ❌ Request exception for {wallet[:10]}...{wallet[-8:]} (attempt {attempt}): {e}")
+                if attempt < self.api_max_retries:
+                    time.sleep(5)
+                    continue
+
+        return None
     
     def _loop(self):
         """Background loop - runs in separate thread"""
@@ -384,42 +484,93 @@ class SimpleRedeemCollector:
         Returns:
             True if successful, False if failed
         """
-        slug = position.get('slug')
-        condition_id = position.get('conditionId')
+        slug = position.get('slug') or position.get('marketSlug')
+        metadata = self.trader.get_market_metadata(slug) if slug else {}
+        condition_id = position.get('conditionId') or metadata.get('condition_id')
         size = position.get('size', 0)
-        neg_risk = position.get('negativeRisk', True)
+        neg_risk = position.get('negativeRisk')
+        if neg_risk is None:
+            neg_risk = position.get('negRisk')
+        if neg_risk is None:
+            neg_risk = metadata.get('neg_risk')
         current_value = position.get('currentValue', 0)
         outcome = position.get('outcome', '')
+        source_wallet = position.get('_collector_wallet', self.wallet)
         coin = None
         for c in ['btc', 'eth', 'sol', 'xrp']:
             if f'{c}-updown-' in (slug or ''):
                 coin = c
                 break
         strategy_name = f"late_v3_{coin}" if coin else None
+
+        if slug and (not condition_id or neg_risk is None) and hasattr(self.trader, 'refresh_market_metadata'):
+            print(f"[REDEEM COLLECTOR]   Refreshing metadata from Gamma before redeem...")
+            self.trader.refresh_market_metadata(slug)
+            metadata = self.trader.get_market_metadata(slug)
+            condition_id = condition_id or metadata.get('condition_id')
+            if position.get('negativeRisk') is None and position.get('negRisk') is None:
+                neg_risk = metadata.get('neg_risk')
+
+        if not slug:
+            print(f"[REDEEM COLLECTOR] ⚠️ Position missing slug, skipping: {position}")
+            return False
+
+        if not condition_id:
+            print(f"[REDEEM COLLECTOR] ⚠️ Missing condition ID for {slug}, skipping")
+            print(f"[REDEEM COLLECTOR]    Metadata present: {bool(metadata)}")
+            return False
         
         print(f"\n[REDEEM COLLECTOR] [{index}/{total}] Processing: {slug}")
-        print(f"  Condition ID: {condition_id[:20]}...")
+        print(f"  Condition ID: {(condition_id or 'MISSING')[:20]}...")
         print(f"  Size: {size:.2f} contracts")
         print(f"  Value: ${current_value:.2f}")
         print(f"  Outcome: {outcome}")
+        print(f"  Wallet: {source_wallet[:10]}...{source_wallet[-8:]}")
         
         try:
             # Get token IDs from cache
             token_ids = self.trader.get_token_ids(slug)
             
             if not token_ids:
-                print(f"[REDEEM COLLECTOR]   No token IDs in cache, fetching metadata...")
-                # Try to fetch metadata
+                print(f"[REDEEM COLLECTOR]   No token IDs in cache, reloading metadata from DB...")
+                if hasattr(self.trader, 'load_market_metadata_from_disk'):
+                    self.trader.load_market_metadata_from_disk()
                 metadata = self.trader.get_market_metadata(slug)
                 token_ids = self.trader.get_token_ids(slug)
+                if position.get('negativeRisk') is None and position.get('negRisk') is None:
+                    neg_risk = metadata.get('neg_risk')
+                if not condition_id:
+                    condition_id = metadata.get('condition_id')
+
+            metadata_missing = (
+                not token_ids
+                or not token_ids.get('UP')
+                or not token_ids.get('DOWN')
+                or not condition_id
+                or neg_risk is None
+            )
+            if metadata_missing and hasattr(self.trader, 'refresh_market_metadata'):
+                print(f"[REDEEM COLLECTOR]   Metadata still incomplete, refreshing from Gamma...")
+                self.trader.refresh_market_metadata(slug)
+                metadata = self.trader.get_market_metadata(slug)
+                token_ids = self.trader.get_token_ids(slug)
+                condition_id = condition_id or metadata.get('condition_id')
+                if position.get('negativeRisk') is None and position.get('negRisk') is None:
+                    neg_risk = metadata.get('neg_risk')
+
+            if neg_risk is None:
+                print(f"[REDEEM COLLECTOR] ⚠️ Missing neg_risk metadata for {slug}, defaulting to standard CTF")
+                neg_risk = False
             
             if not token_ids or not token_ids.get('UP') or not token_ids.get('DOWN'):
                 print(f"[REDEEM COLLECTOR] ⚠️ No token IDs for {slug}, skipping")
+                print(f"[REDEEM COLLECTOR]    Metadata available: {bool(metadata)}")
                 print(f"[REDEEM COLLECTOR]    This position cannot be redeemed without token IDs")
                 return False
             
             print(f"[REDEEM COLLECTOR]   UP token: {token_ids['UP'][:10]}...")
             print(f"[REDEEM COLLECTOR]   DOWN token: {token_ids['DOWN'][:10]}...")
+            print(f"[REDEEM COLLECTOR]   Neg risk: {neg_risk}")
             print(f"[REDEEM COLLECTOR]   Calling redeem_position()...")
 
             position_in_memory = False
@@ -672,6 +823,133 @@ class SimpleRedeemCollector:
             traceback.print_exc()
             return False
     
+    def _check_and_redeem_all(self, check_type: str = "PERIODIC"):
+        """
+        Check API and redeem ALL.
+
+        Re-defined near the end of the class so the locking/manual-trigger
+        behavior is the effective implementation even if older copies remain
+        above from previous merges.
+        """
+        if not self._check_lock.acquire(blocking=False):
+            print(f"[REDEEM COLLECTOR] Check skipped ({check_type}): another redeem cycle is already running")
+            return
+
+        try:
+            print(f"\n{'='*80}")
+            if check_type == "STARTUP":
+                print(f"[REDEEM COLLECTOR] STARTUP CHECK")
+                print(f"[REDEEM COLLECTOR] Collecting unredeemed from before restart...")
+            elif check_type == "PERIODIC":
+                print(f"[REDEEM COLLECTOR] PERIODIC CHECK #{self.stats['total_checks'] + 1}")
+            else:
+                print(f"[REDEEM COLLECTOR] {check_type} CHECK")
+            print(f"{'='*80}")
+
+            self.stats['total_checks'] += 1
+            self.last_check = time.time()
+
+            has_safety = hasattr(self.executor, 'safety')
+            dry_run = self.executor.safety.dry_run if has_safety else 'NO_SAFETY_ATTR'
+            print(f"[REDEEM_CHECK] dry_run={dry_run} has_safety={has_safety}")
+
+            if has_safety and dry_run:
+                self._dry_run_resolve_from_memory()
+                return
+
+            positions = self._fetch_redeemable_positions()
+            if positions is None:
+                print(f"[REDEEM COLLECTOR] API request failed, skipping this cycle")
+                return
+
+            print(f"[REDEEM COLLECTOR] Found {len(positions)} redeemable position(s)")
+            if not positions:
+                print(f"[REDEEM COLLECTOR] Nothing to redeem")
+                if check_type == "STARTUP":
+                    print(f"[REDEEM COLLECTOR] All positions were already claimed before restart")
+                return
+
+            total_size = sum(p.get('size', 0) for p in positions)
+            total_value = sum(p.get('currentValue', 0) for p in positions)
+            print(f"[REDEEM COLLECTOR] Summary:")
+            print(f"  Total contracts: {total_size:.2f}")
+            print(f"  Estimated value: ${total_value:.2f}")
+
+            if check_type == "STARTUP":
+                print(f"[REDEEM COLLECTOR] These positions accumulated before script restart")
+
+            print(f"\n[REDEEM COLLECTOR] Starting redeem process...")
+            success_count = 0
+            failed_count = 0
+
+            for i, pos in enumerate(positions, 1):
+                result = self._redeem_one(i, len(positions), pos)
+                if result:
+                    success_count += 1
+                else:
+                    failed_count += 1
+
+                if i < len(positions):
+                    time.sleep(self.pause_between)
+
+            print(f"\n[REDEEM COLLECTOR] Check completed")
+            print(f"  Successful: {success_count}/{len(positions)}")
+            print(f"  Failed: {failed_count}/{len(positions)}")
+            print(f"  Total redeemed (session): {self.stats['total_redeemed']}")
+            print(f"{'='*80}\n")
+        finally:
+            self._check_lock.release()
+
+    def _fetch_redeemable_positions(self) -> Optional[List[Dict]]:
+        """
+        Query Polymarket API to get redeemable positions.
+
+        Re-defined near the end of the class so we can merge results across
+        candidate wallets when proxy/funder setups differ from the on-chain
+        wallet used elsewhere in the bot.
+        """
+        wallets = self._wallet_candidates()
+        if not wallets:
+            print(f"[REDEEM COLLECTOR] No wallet candidates available for redeem scan")
+            return None
+
+        print(
+            f"[REDEEM COLLECTOR] Wallet candidates: "
+            f"{', '.join(f'{wallet[:10]}...{wallet[-8:]}' for wallet in wallets)}"
+        )
+
+        merged_positions = []
+        seen = set()
+        successful_queries = 0
+
+        for wallet in wallets:
+            positions = self._fetch_redeemable_positions_for_wallet(wallet)
+            if positions is None:
+                continue
+
+            successful_queries += 1
+            for position in positions:
+                key = (
+                    position.get('slug'),
+                    position.get('conditionId'),
+                    position.get('outcome'),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                enriched = dict(position)
+                enriched['_collector_wallet'] = wallet
+                merged_positions.append(enriched)
+
+        if successful_queries == 0:
+            return None
+
+        print(
+            f"[REDEEM COLLECTOR] Merged {len(merged_positions)} unique position(s) "
+            f"across {successful_queries} successful wallet quer{'y' if successful_queries == 1 else 'ies'}"
+        )
+        return merged_positions
+
     def get_stats(self) -> Dict:
         """Get collector statistics"""
         return {

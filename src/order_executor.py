@@ -2177,6 +2177,7 @@ class OrderExecutor:
         gas_multiplier = redeem_cfg.get("gas_price_multiplier", 1.5)
         max_gas_retries = 5  # Max retries for gas price errors
         gas_retry_delay = 3  # Seconds between retries
+        tx_confirmation_timeout = redeem_cfg.get("tx_confirmation_timeout_sec", 180)
         
         try:
             # Contract addresses
@@ -2229,6 +2230,7 @@ class OrderExecutor:
             
             print(f"[REDEEM] {market_slug}")
             print(f"  UP: {up_balance / 1e6:.2f}, DOWN: {down_balance / 1e6:.2f}")
+            print(f"  Method: {'NEG_RISK_ADAPTER' if neg_risk else 'CTF'}")
             
             if up_balance == 0 and down_balance == 0:
                 self._log_redeem(market_slug, True, 0.0, "", "NO_TOKENS")
@@ -2295,7 +2297,7 @@ class OrderExecutor:
                     print(f"  TX: {tx_hash.hex()}")
                     print(f"  Waiting for confirmation...")
                     
-                    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
+                    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=tx_confirmation_timeout)
                     
                     if receipt.status == 1:
                         # Calculate amount received (winner's balance)
