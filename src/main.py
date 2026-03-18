@@ -432,7 +432,13 @@ def main():
     print()
     
     # Initialize dashboard (pass config for trading status display)
-    dashboard = DashboardMultiAB(width=160, coins=COINS, config=config)
+    keyboard_available = sys.stdin.isatty()
+    dashboard = DashboardMultiAB(
+        width=160,
+        coins=COINS,
+        config=config,
+        show_keyboard_controls=keyboard_available,
+    )
     
     # Initialize Telegram notifier with event callback
     dashboard.add_event("Initializing Telegram notifier...", 'system')
@@ -2011,13 +2017,17 @@ def main():
     print()
     
     # Initialize keyboard listener for manual commands
-    try:
-        keyboard_listener = KeyboardListener()
-        keyboard_listener.register_callback('m', run_manual_redeem, "Manual redeem")
-        keyboard_listener.start()
-        print("[KEYBOARD] Listener active")
-    except Exception as e:
-        print(f"[KEYBOARD] Not available: {e}")
+    if keyboard_available:
+        try:
+            keyboard_listener = KeyboardListener()
+            keyboard_listener.register_callback('m', run_manual_redeem, "Manual redeem")
+            keyboard_listener.start()
+            print("[KEYBOARD] Listener active")
+        except Exception as e:
+            print(f"[KEYBOARD] Not available: {e}")
+            keyboard_listener = None
+    else:
+        print("[KEYBOARD] Not available: stdin is not a TTY")
         keyboard_listener = None
     print()
     

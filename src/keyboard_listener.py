@@ -1,6 +1,7 @@
 """
 Non-blocking keyboard listener for dashboard controls
 """
+import io
 import sys
 import select
 import termios
@@ -41,8 +42,14 @@ class KeyboardListener:
     
     def _listener_loop(self):
         """Main listener loop (runs in thread)"""
-        # Save terminal settings
-        old_settings = termios.tcgetattr(sys.stdin)
+        try:
+            # Save terminal settings. Headless systemd services do not provide a TTY,
+            # so keyboard controls should disable cleanly instead of crashing a thread.
+            old_settings = termios.tcgetattr(sys.stdin)
+        except (termios.error, ValueError, OSError) as e:
+            self.running = False
+            print(f"\n[KEYBOARD] Disabled: {e}")
+            return
         
         try:
             # Set terminal to raw mode for character-by-character input
@@ -75,6 +82,14 @@ class KeyboardListener:
         """Start the keyboard listener in a background thread"""
         if self.running:
             return
+
+        if not sys.stdin.isatty():
+            raise RuntimeError("stdin is not a TTY")
+
+        try:
+            sys.stdin.fileno()
+        except (AttributeError, io.UnsupportedOperation) as e:
+            raise RuntimeError(f"stdin is not readable: {e}") from e
         
         self.running = True
         self.thread = threading.Thread(target=self._listener_loop, daemon=True)

@@ -10,13 +10,20 @@ from multi_trader import MultiTrader
 class DashboardMultiAB:
     """Multi-market dashboard - grouped by strategies"""
     
-    def __init__(self, width: int = 160, coins: list = None, config: dict = None):
+    def __init__(
+        self,
+        width: int = 160,
+        coins: list = None,
+        config: dict = None,
+        show_keyboard_controls: bool = True,
+    ):
         self.width = width
         self.start_time = time.time()
         self.coins = coins or ['btc', 'eth', 'sol', 'xrp']
         self.events_log = []  # Last N events for display
         self.max_events = 10
         self.config = config or {}
+        self.show_keyboard_controls = show_keyboard_controls
     
     def add_event(self, message: str, event_type: str = 'info'):
         """Add event to log (ONLY critical errors displayed in terminal)"""
@@ -198,7 +205,8 @@ class DashboardMultiAB:
         
         # Add keyboard controls footer
         output.append("─" * self.width)
-        output.append("🎹 Keyboard: [M] Manual Redeem All  │  [Ctrl+C] Stop Trading".center(self.width))
+        if self.show_keyboard_controls:
+            output.append("🎹 Keyboard: [M] Manual Redeem All  │  [Ctrl+C] Stop Trading".center(self.width))
         
         return '\n'.join(output)
     
