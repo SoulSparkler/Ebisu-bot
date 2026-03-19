@@ -48,7 +48,7 @@ class TelegramNotifier:
             rate_limit: Max messages per second (default: 2)
             event_callback: Callback function(message, event_type) for logging events
         """
-        # Get from env if not provided. Legacy Railway names are accepted so
+        # Get from env if not provided. Legacy aliases are accepted so
         # older deployments can still answer /start and show the missing chat ID.
         self.bot_token = (bot_token or _first_env(
             "TELEGRAM_BOT_TOKEN",
@@ -97,14 +97,14 @@ class TelegramNotifier:
                     self.event_callback("Telegram disabled (missing TELEGRAM_BOT_TOKEN)", 'info')
 
     def _build_setup_message(self, chat_id: str) -> str:
-        """Explain the missing Railway variable and show the user's chat ID."""
+        """Explain the missing environment variable and show the user's chat ID."""
         return (
             "<b>Telegram setup required</b>\n\n"
             "The bot token is configured, but <code>TELEGRAM_CHAT_ID</code> is missing.\n\n"
             f"Your current chat ID is:\n<code>{chat_id}</code>\n\n"
-            "Add this Railway variable and redeploy:\n"
+            "Add this environment variable and restart the bot:\n"
             f"<code>TELEGRAM_CHAT_ID={chat_id}</code>\n\n"
-            "After the deploy finishes, send /start again."
+            "After the restart finishes, send /start again."
         )
     
     def _worker(self):

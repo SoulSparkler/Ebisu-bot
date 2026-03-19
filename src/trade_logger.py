@@ -5,7 +5,7 @@ import json
 import logging
 from typing import Optional, Dict
 
-# Use stdout logging for Railway (no file handler)
+# Use stdout logging only (no file handler)
 trades_logger = logging.getLogger('trades')
 trades_logger.setLevel(logging.INFO)
 if not trades_logger.handlers:

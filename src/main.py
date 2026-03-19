@@ -124,7 +124,7 @@ def load_config(config_path: str = None) -> dict:
     if config_path is None:
         config_dir = Path(__file__).parent.parent / "config"
         config_path = config_dir / "config.json"
-        # Fall back to config.example.json (Railway deploys without config.json)
+        # Fall back to config.example.json when a local config.json is not present
         if not config_path.exists():
             config_path = config_dir / "config.example.json"
             print(f"[CONFIG] config.json not found, using {config_path}")
@@ -245,7 +245,7 @@ def main():
     except Exception as e:
         print(f"[DB] ⚠️ Database initialization failed: {e}")
         print(f"[DB] ⚠️ Bot will continue but trades won't be persisted!")
-        print(f"[DB] ⚠️ Make sure DATABASE_URL is set in Railway variables")
+        print(f"[DB] ⚠️ Make sure DATABASE_URL is configured in the environment")
 
     # Track session start time for uptime
     session_start_time = time.time()

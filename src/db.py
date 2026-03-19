@@ -1,6 +1,6 @@
 """
-Database connection and initialization for Railway/PostgreSQL
-Replaces all local file storage
+Database connection and initialization for PostgreSQL.
+Replaces local file storage for persisted bot state.
 """
 import os
 import json

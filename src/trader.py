@@ -33,7 +33,7 @@ def set_data_feed(data_feed):
 
 
 def save_market_metadata_to_disk():
-    """Save metadata to PostgreSQL (Railway-compatible replacement)"""
+    """Save metadata to PostgreSQL."""
     try:
         from db import save_market_metadata
         for market_slug in _token_ids_cache:
@@ -51,7 +51,7 @@ def save_market_metadata_to_disk():
 
 
 def load_market_metadata_from_disk():
-    """Load metadata from PostgreSQL (Railway-compatible replacement)"""
+    """Load metadata from PostgreSQL."""
     global _token_ids_cache, _market_metadata_cache
     try:
         from db import load_all_market_metadata
@@ -921,7 +921,7 @@ class Trader:
         return snapshot
     
     def _log_exit_orderbook(self, snapshot: Dict):
-        """Log orderbook snapshot (print only, no file on Railway)"""
+        """Log orderbook snapshot to stdout only."""
         # Print summary to console
         print(f"\n{'='*80}")
         print(f"[EXIT ORDERBOOK] {snapshot['coin'].upper()} - {snapshot['exit_reason']}")
