@@ -605,7 +605,7 @@ Winner: {winner}"""
 /showparams - Show current strategy parameters
 /showlogs [n] - Show last N trades (default 10)
 
-<b>Available keys:</b> pair_cost_ceiling, entry_window_sec, entry_frequency_sec, min_confidence, price_max, max_investment_per_market, sizing_above_180, sizing_above_120, sizing_below_120, flip_stop_price
+<b>Available keys:</b> pair_cost_ceiling, entry_window_sec, entry_frequency_sec, min_confidence, price_min, price_max, max_investment_per_market, sizing_above_180, sizing_above_120, sizing_below_120, flip_stop_price
 
 <b>💡 Tip:</b> Charts are sent automatically every 10 markets.
 <b>🔒 Security:</b> Commands only work from authorized chat ID."""

@@ -17,6 +17,7 @@ PARAM_LIMITS: Dict = {
     'entry_frequency_sec':       (1,    60),
     'min_confidence':            (0.05, 0.50),
     'max_spread':                (1.00, 1.10),
+    'price_min':                 (0.01, 0.49),
     'price_max':                 (0.50, 0.98),
     'max_investment_per_market': (10,   1000),
     'sizing_above_180':          (1,    50),
@@ -38,6 +39,7 @@ class LateEntryStrategy:
         self.entry_freq = strategy_cfg.get('entry_frequency_sec', 7)
         self.min_confidence = strategy_cfg.get('min_confidence', 0.30)
         self.max_spread = strategy_cfg.get('max_spread', 1.05)
+        self.price_min = strategy_cfg.get('price_min', 0.10)
         self.price_max = strategy_cfg.get('price_max', 0.93)
         
         # Sizing (contracts) - time-based FROM CONFIG!
@@ -233,6 +235,14 @@ class LateEntryStrategy:
 
         fav_price = up_ask if side == 'UP' else down_ask
 
+        # PRICE MIN
+        if fav_price < self.price_min:
+            logger.warning(
+                "SKIP_PRICE_MIN pair=%.4f fav=%.3f < %.2f side=%s stc=%ds %s",
+                pair_cost, fav_price, self.price_min, side, time_left, market,
+            )
+            return None
+
         # PRICE MAX
         if fav_price > self.price_max:
             logger.warning(
@@ -336,6 +346,8 @@ class LateEntryStrategy:
                 self.min_confidence = safe; changed.append(f"min_confidence={safe}")
             elif key == 'max_spread':
                 self.max_spread = safe; changed.append(f"max_spread={safe}")
+            elif key == 'price_min':
+                self.price_min = safe; changed.append(f"price_min={safe}")
             elif key == 'price_max':
                 self.price_max = safe; changed.append(f"price_max={safe}")
             elif key == 'max_investment_per_market':
@@ -360,6 +372,7 @@ class LateEntryStrategy:
             'entry_frequency_sec':       self.entry_freq,
             'min_confidence':            self.min_confidence,
             'max_spread':                self.max_spread,
+            'price_min':                 self.price_min,
             'price_max':                 self.price_max,
             'max_investment_per_market': self.max_investment,
             'sizing_above_180':          self.size_above_180,

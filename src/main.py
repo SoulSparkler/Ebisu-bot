@@ -177,6 +177,7 @@ wallet_balance = 0.0  # Will be set in main() after wallet check
 
 def validate_prices(up_ask: float, down_ask: float, up_timestamp: float, down_timestamp: float,
                    coin: str = '', threshold_sec: float = 7.0,
+                   min_sum: float = 0.95, max_sum: float = 1.15,
                    last_message_time: float = 0.0) -> tuple:
     """
     Validate that prices are fresh and the WebSocket connection is alive.
@@ -209,7 +210,7 @@ def validate_prices(up_ask: float, down_ask: float, up_timestamp: float, down_ti
     # Check 3: Sum validation (UP + DOWN ≈ 1.0)
     # Allow wider range (0.95-1.15) to account for spread and rapid price changes
     price_sum = up_ask + down_ask
-    if price_sum < 0.95 or price_sum > 1.15:
+    if price_sum < min_sum or price_sum > max_sum:
         return False, f"INVALID_SUM_{price_sum:.3f}"
 
     return True, "OK"
@@ -434,7 +435,7 @@ def main():
     # Pair-cost floor measurement: {coin: {market_slug: {stats}}}
     pair_cost_stats = {coin: {} for coin in COINS}
     debug_log_times = {
-        coin: {'window_check': 0.0, 'switch_debug': 0.0}
+        coin: {'window_check': 0.0, 'switch_debug': 0.0, 'entry_price': 0.0}
         for coin in COINS
     }
 
@@ -1867,6 +1868,27 @@ def main():
                     # Favored filled on a previous tick but hedge order failed.
                     # Retry hedge on every price update until it fills or market ends.
                     # ═══════════════════════════════════════════════════════
+                    # Validate prices before any hedge retry or new entry.
+                    # Entry uses a looser lower sum bound than exits so we still
+                    # allow discounted books, but reject obviously broken quotes.
+                    up_ask_ts = market_state.get('up_ask_timestamp', 0)
+                    down_ask_ts = market_state.get('down_ask_timestamp', 0)
+                    last_msg_ts = market_state.get('last_message_time', 0)
+                    entry_prices_valid, entry_price_reason = validate_prices(
+                        up_ask, down_ask, up_ask_ts, down_ask_ts, coin,
+                        min_sum=0.90,
+                        last_message_time=last_msg_ts,
+                    )
+                    if not entry_prices_valid:
+                        price_log_now = time.time()
+                        if price_log_now - debug_log_times[coin]['entry_price'] >= LOG_THROTTLE_SECONDS:
+                            print(
+                                f"[ENTRY_PRICE] {coin.upper()} prices invalid: "
+                                f"{entry_price_reason}, skipping hedge/entry checks"
+                            )
+                            debug_log_times[coin]['entry_price'] = price_log_now
+                        continue
+
                     if market_slug in pending_hedges[coin] and market_slug not in arb_markets[coin]:
                         ph = pending_hedges[coin][market_slug]
                         ph_price = up_ask if ph['side'] == 'UP' else down_ask
