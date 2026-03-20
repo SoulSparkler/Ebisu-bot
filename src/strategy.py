@@ -195,8 +195,8 @@ class LateEntryStrategy:
         pair_cost = up_ask + down_ask
 
         # ─────────────────────────────────────────────────────────
-        # ARBITRAGE MODE: pair_cost < 0.99 AND one side < 0.45
-        # Buy BOTH sides simultaneously — guaranteed $1.00 at resolution
+        # ARBITRAGE CHECK: log arb-like setups, but do not enter both sides.
+        # Arb mode stays disabled until we can use maker orders.
         # ─────────────────────────────────────────────────────────
         ARB_SIDE_THRESHOLD = 0.45
         arb_condition = min(up_ask, down_ask) < ARB_SIDE_THRESHOLD
@@ -207,39 +207,10 @@ class LateEntryStrategy:
             up_ask, down_ask, time_left, market,
         )
         if arb_condition:
-            size = self.size_above_180 if time_left > 180 else (self.size_above_120 if time_left > 120 else self.size_below_120)
-            self.last_entry[market] = now
-            # Buy the CHEAPER side first: it has thinner ask-side liquidity so we
-            # want to know early if it fails (avoid a one-sided position).
-            # The more-expensive side is the market favourite and fills more reliably
-            # as the hedge.
-            if up_ask <= down_ask:
-                fav_side, fav_price_val = 'UP', up_ask
-                hedge_side_val, hedge_price_val = 'DOWN', down_ask
-            else:
-                fav_side, fav_price_val = 'DOWN', down_ask
-                hedge_side_val, hedge_price_val = 'UP', up_ask
             logger.info(
-                "[ARB_ENTRY] pair_cost=%.4f fav=%s(%.3f) hedge=%s(%.3f) stc=%ds %s",
-                pair_cost, fav_side, fav_price_val, hedge_side_val, hedge_price_val, time_left, market,
+                "[ARB_DISABLED] pair_cost=%.3f -- arb mode disabled, checking directional",
+                pair_cost,
             )
-            return {
-                'favored': {
-                    'side': fav_side,
-                    'price': fav_price_val,
-                    'contracts': size,
-                },
-                'hedge': {
-                    'side': hedge_side_val,
-                    'price': hedge_price_val,
-                    'contracts': size,
-                },
-                'confidence': abs(up_ask - down_ask),
-                'is_recovery': False,
-                'is_arbitrage': True,
-                'entry_reason': f'arb_entry_{time_left}s',
-                'winner_ratio': 0.0,
-            }
 
         # ─────────────────────────────────────────────────────────
         # DIRECTIONAL MODE (fallback when no ARB edge)
@@ -270,7 +241,7 @@ class LateEntryStrategy:
             )
             return None
 
-        # POSITION SIZE CAP — hard $12 ceiling across both sides
+        # POSITION SIZE CAP - hard $8 ceiling across both sides
         if position:
             up_invested = position.get('up_invested', 0.0)
             dn_invested = position.get('down_invested', 0.0)
