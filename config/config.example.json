@@ -29,6 +29,7 @@
     "entry_frequency_sec": 7,
     "min_confidence": 0.30,
     "max_spread": 1.05,
+    "pair_cost_ceiling": 0.99,
     "price_max": 0.92,
     "max_investment_per_market": 300,
     "sizing": {
@@ -71,6 +72,12 @@
     }
   },
   "execution": {
+    "maker_mode": false,
+    "maker_offset_cents": 2,
+    "maker_cancel_before_close_sec": 60,
+    "maker_max_open_per_market": 1,
+    "fallback_to_taker": true,
+    "dry_run_maker": true,
     "buy": {
       "order_type": "FAK",
       "max_fak_attempts": 3,

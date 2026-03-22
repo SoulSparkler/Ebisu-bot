@@ -23,6 +23,8 @@ import logging
 from trade_logger import log_buy_attempt, log_buy_result, log_sell_attempt, log_sell_result
 import threading
 
+logger = logging.getLogger("ebisu.order_executor")
+
 DEFAULT_POLYGON_RPC_ENDPOINTS = [
     "https://polygon.drpc.org",
     "https://polygon.publicnode.com",
@@ -597,16 +599,168 @@ class OrderExecutor:
             print(f"[EXECUTOR] ⚠️ Failed to get fresh BID: {e}")
             return None
     
-    def place_buy_order(self, market_slug: str, token_id: str, side: str, 
-                       contracts: int, ask_price: float, coin: str = None) -> OrderResult:
+    def place_buy_order(self, market_slug: str, token_id: str, side: str,
+                       contracts: int, ask_price: float, coin: str = None,
+                       maker_mode: bool = False, orderbook=None) -> OrderResult:
+        """Place a buy order using maker or taker routing."""
+        _ = orderbook
+        if maker_mode:
+            return self._place_maker_order(
+                market_slug=market_slug,
+                token_id=token_id,
+                side=side,
+                contracts=contracts,
+                ask_price=ask_price,
+                coin=coin,
+            )
+        return self._place_taker_order(
+            market_slug=market_slug,
+            token_id=token_id,
+            side=side,
+            contracts=contracts,
+            ask_price=ask_price,
+            coin=coin,
+        )
+
+    def _simulate_maker_order(self, market_slug: str, token_id: str, side: str,
+                              contracts: int, ask_price: float) -> OrderResult:
+        execution_cfg = self.config.get('execution', {})
+        maker_offset = float(execution_cfg.get('maker_offset_cents', 2)) / 100.0
+        maker_price = max(0.01, round(ask_price - maker_offset, 2))
+        logger.info(
+            "MAKER_DRY_RUN would_post price=%.3f size=%.1f side=%s token=%s ask=%.3f market=%s",
+            maker_price,
+            contracts,
+            side,
+            (token_id or "")[:16],
+            ask_price,
+            market_slug,
+        )
+        return OrderResult(
+            success=True,
+            order_id=f"dry_run_{int(time.time() * 1000)}",
+            filled_size=0.0,
+            filled_price=maker_price,
+            total_spent_usd=0.0,
+            attempts=1,
+            dry_run=True,
+        )
+
+    def _place_maker_order(self, market_slug: str, token_id: str, side: str,
+                           contracts: int, ask_price: float, coin: str = None) -> OrderResult:
+        """Post a maker order or dry-run/log it during phase 1."""
+        if not coin:
+            for c in ['btc', 'eth', 'sol', 'xrp']:
+                if f'{c}-updown-' in market_slug:
+                    coin = c
+                    break
+
+        execution_cfg = self.config.get('execution', {})
+        fallback_to_taker = execution_cfg.get('fallback_to_taker', True)
+        is_dry_run_maker = execution_cfg.get('dry_run_maker', False)
+
+        allowed, reason = self.safety.check_order_allowed(
+            side=side,
+            contracts=contracts,
+            price=ask_price,
+            market_slug=market_slug
+        )
+
+        if not allowed:
+            if reason == "DRY_RUN_MODE":
+                return self._simulate_maker_order(market_slug, token_id, side, contracts, ask_price)
+            print(f"[EXECUTOR] ❌ Order blocked: {reason}")
+            return OrderResult(success=False, error=reason)
+
+        if is_dry_run_maker:
+            return self._simulate_maker_order(market_slug, token_id, side, contracts, ask_price)
+
+        maker_offset = float(execution_cfg.get('maker_offset_cents', 2)) / 100.0
+        maker_price = max(0.01, round(ask_price - maker_offset, 2))
+        logger.info(
+            "MAKER_ORDER attempt price=%.3f size=%.1f side=%s token=%s ask=%.3f market=%s",
+            maker_price,
+            contracts,
+            side,
+            (token_id or "")[:16],
+            ask_price,
+            market_slug,
+        )
+
+        try:
+            order_args = OrderArgs(
+                price=maker_price,
+                size=round(contracts, 2),
+                side=BUY,
+                token_id=token_id,
+            )
+            signed_order = self.client.create_order(order_args)
+            api_result = self.client.post_order(signed_order, OrderType.GTC, post_only=True)
+
+            if api_result.get("success"):
+                order_id = api_result.get("orderID", "N/A")
+                logger.info(
+                    "MAKER_ORDER_POSTED order_id=%s price=%.3f size=%.1f market=%s",
+                    order_id,
+                    maker_price,
+                    contracts,
+                    market_slug,
+                )
+                return OrderResult(
+                    success=True,
+                    order_id=order_id,
+                    filled_size=0.0,
+                    filled_price=maker_price,
+                    total_spent_usd=0.0,
+                    attempts=1,
+                )
+
+            error_msg = api_result.get("errorMsg", "Unknown")
+            logger.warning(
+                "MAKER_ORDER_REJECTED reason=%s fallback=%s market=%s",
+                error_msg,
+                "taker" if fallback_to_taker else "none",
+                market_slug,
+            )
+            if fallback_to_taker:
+                return self._place_taker_order(
+                    market_slug=market_slug,
+                    token_id=token_id,
+                    side=side,
+                    contracts=contracts,
+                    ask_price=ask_price,
+                    coin=coin,
+                )
+            return OrderResult(success=False, error=error_msg)
+
+        except Exception as exc:
+            logger.error(
+                "MAKER_ORDER_EXCEPTION error=%s fallback=%s market=%s",
+                exc,
+                "taker" if fallback_to_taker else "none",
+                market_slug,
+            )
+            if fallback_to_taker:
+                return self._place_taker_order(
+                    market_slug=market_slug,
+                    token_id=token_id,
+                    side=side,
+                    contracts=contracts,
+                    ask_price=ask_price,
+                    coin=coin,
+                )
+            return OrderResult(success=False, error=str(exc))
+
+    def _place_taker_order(self, market_slug: str, token_id: str, side: str,
+                           contracts: int, ask_price: float, coin: str = None) -> OrderResult:
         """
         Place BUY order with FAK partial fill tracking
-        
+
         🚨 CRITICAL: FAK orders can fill partially!
         - Track actual fill through takingAmount/makingAmount
         - Complete to target with max_fak_attempts attempts
         - Round to 2 decimals, minimum $1.00
-        
+
         Args:
             market_slug: Market slug
             token_id: Token ID to buy
@@ -614,7 +768,7 @@ class OrderExecutor:
             contracts: Target number of contracts (may NOT be reached!)
             ask_price: Current ask price
             coin: Coin name ('btc', 'eth', 'sol', 'xrp') for per-coin blocking
-            
+
         Returns:
             OrderResult (filled_size can be < contracts!)
         """

@@ -55,6 +55,144 @@ redeem_collector = None  # Shared so manual triggers and shutdown can access col
 # Global redeem positions cache for Telegram /r command
 redeem_positions_cache = []
 redeem_cache_lock = threading.Lock()
+open_maker_orders = {}
+
+
+def init_open_orders():
+    """Initialize maker-order tracking state."""
+    global open_maker_orders
+    open_maker_orders = {}
+    logger.info("Open maker order tracking initialized")
+
+
+def _maker_flow_enabled(config: Dict) -> bool:
+    execution_cfg = config.get('execution', {})
+    return bool(execution_cfg.get('maker_mode', False) or execution_cfg.get('dry_run_maker', False))
+
+
+def check_and_post_maker_order(signal: Dict, market_state: Dict, order_executor: OrderExecutor, config: Dict):
+    """
+    Track one maker order per market during phase 1 and post a new one when needed.
+
+    When `dry_run_maker` is enabled we still route through the maker path so the
+    bot logs the intended post-only price without sending a real order.
+    """
+    global open_maker_orders
+
+    if not _maker_flow_enabled(config):
+        return
+
+    favored = signal.get('favored', {})
+    side = favored.get('side')
+    contracts = favored.get('contracts', 0)
+    market_slug = market_state.get('market_slug')
+    if side not in ('UP', 'DOWN') or contracts <= 0 or not market_slug:
+        return
+
+    ask_price = favored.get('price')
+    if ask_price is None:
+        ask_price = market_state.get('up_ask') if side == 'UP' else market_state.get('down_ask')
+
+    token_id = trader_module.get_token_ids(market_slug).get(side)
+    if not token_id or ask_price is None:
+        logger.warning(
+            "MAKER_SIGNAL_INCOMPLETE market=%s side=%s token=%s ask=%s",
+            market_slug,
+            side,
+            "yes" if token_id else "no",
+            ask_price,
+        )
+        return
+
+    execution_cfg = config.get('execution', {})
+    cancel_before_close_sec = execution_cfg.get('maker_cancel_before_close_sec', 60)
+    existing = open_maker_orders.get(market_slug)
+    if existing:
+        order_id = existing['order_id']
+        seconds_till_end = market_state.get('seconds_till_end', 0) or 0
+
+        if existing.get('simulated'):
+            if seconds_till_end <= cancel_before_close_sec:
+                logger.info("MAKER_DRY_RUN_WINDOW_CLOSE market=%s order_id=%s", market_slug, order_id)
+                del open_maker_orders[market_slug]
+            else:
+                return
+        else:
+            age_sec = time.time() - existing['posted_at']
+            try:
+                order_status = order_executor.client.get_order(order_id)
+                status = order_status.get('status', 'UNKNOWN')
+
+                if status == 'MATCHED':
+                    logger.info("MAKER_FILLED order_id=%s market=%s age=%.0fs", order_id, market_slug, age_sec)
+                    del open_maker_orders[market_slug]
+                elif status == 'CANCELLED':
+                    logger.info("MAKER_CANCELLED market=%s order_id=%s", market_slug, order_id)
+                    del open_maker_orders[market_slug]
+                elif status == 'OPEN' and seconds_till_end <= cancel_before_close_sec:
+                    try:
+                        order_executor.client.cancel(order_id)
+                        logger.info("MAKER_CANCELLED market=%s order_id=%s", market_slug, order_id)
+                    except Exception as exc:
+                        logger.warning("MAKER_CANCEL_FAILED order_id=%s error=%s", order_id, exc)
+                    del open_maker_orders[market_slug]
+                else:
+                    return
+            except Exception as exc:
+                logger.warning("MAKER_FILL_CHECK_FAILED order_id=%s error=%s", order_id, exc)
+                return
+
+    result = order_executor.place_buy_order(
+        market_slug=market_slug,
+        token_id=token_id,
+        side=side,
+        contracts=contracts,
+        ask_price=ask_price,
+        coin=market_state.get('coin'),
+        maker_mode=True,
+        orderbook=signal.get('orderbook'),
+    )
+
+    if result.success and result.order_id:
+        open_maker_orders[market_slug] = {
+            'order_id': result.order_id,
+            'side': side,
+            'price': result.filled_price,
+            'posted_at': time.time(),
+            'simulated': result.dry_run,
+        }
+        logger.info("MAKER_TRACKED market=%s order_id=%s side=%s", market_slug, result.order_id, side)
+    else:
+        logger.warning(
+            "MAKER_SIGNAL_FAILED market=%s side=%s error=%s",
+            market_slug,
+            side,
+            result.error or "unknown",
+        )
+
+
+def cleanup_makers_on_window_close(market_slug: str, order_executor: OrderExecutor):
+    """Cancel or clear any tracked maker order when a market window closes."""
+    global open_maker_orders
+
+    if market_slug not in open_maker_orders:
+        return
+
+    order_info = open_maker_orders[market_slug]
+    order_id = order_info['order_id']
+    if order_info.get('simulated'):
+        logger.info("MAKER_WINDOW_CLOSE_DRY_RUN market=%s order_id=%s", market_slug, order_id)
+        del open_maker_orders[market_slug]
+        return
+
+    logger.info("MAKER_WINDOW_CLOSE market=%s order_id=%s cancelling", market_slug, order_id)
+    try:
+        order_executor.client.cancel(order_id)
+        logger.info("MAKER_CANCELLED_SUCCESS order_id=%s", order_id)
+    except Exception as exc:
+        logger.warning("MAKER_CANCEL_FAILED order_id=%s error=%s", order_id, exc)
+
+    del open_maker_orders[market_slug]
 
 
 def signal_handler(sig, frame):
@@ -268,6 +406,7 @@ def main():
     
     # Load config FIRST
     config = load_config()
+    init_open_orders()
     
     # Track completed markets for chart generation
     total_completed_markets = 0
@@ -1979,6 +2118,10 @@ def main():
                             # Skip entry - trading disabled for this coin
                             dashboard.add_event(f"Trading disabled for {coin.upper()}, skipping entry", 'system')
                             continue
+
+                        if _maker_flow_enabled(config):
+                            check_and_post_maker_order(signal, market_state, order_executor, config)
+                            continue
                         
                         # Calculate price
                         price = up_ask if side == 'UP' else down_ask
@@ -2135,6 +2278,7 @@ def main():
 
                         _is_arb = prev_market in arb_markets[coin]
                         print(f"[WINDOW_CLOSE] market={prev_market} winner=pending arb={_is_arb}")
+                        cleanup_makers_on_window_close(prev_market, order_executor)
 
                         price_start = market_start_prices[coin].get(prev_market, 0)
                         
