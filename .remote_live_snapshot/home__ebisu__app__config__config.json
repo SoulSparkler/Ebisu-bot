@@ -1,0 +1,148 @@
+{
+  "safety": {
+    "dry_run": false,
+    "max_order_size_usd": 10.0,
+    "max_orders_per_minute": 100,
+    "max_total_investment": 40.0
+  },
+  "trading": {
+    "btc": {
+      "enabled": false,
+      "reason": "Disabled — pair costs rarely dip below $0.99 (0.1% of samples)"
+    },
+    "eth": {
+      "enabled": false,
+      "reason": "Disabled — pair costs rarely dip below $0.99 (1.2% of samples)"
+    },
+    "sol": {
+      "enabled": true,
+      "reason": "1.5% of samples below $0.99"
+    },
+    "xrp": {
+      "enabled": false,
+      "reason": "Disabled temporarily - XRP trading halted"
+    }
+  },
+  "strategy": {
+    "name": "late_entry_v3",
+    "entry_window_sec": 900,
+    "entry_frequency_sec": 7,
+    "min_confidence": 0.40,
+    "max_spread": 1.05,
+    "price_max": 0.92,
+    "max_investment_per_market": 20,
+    "sizing": {
+      "above_180_sec": 4,
+      "above_120_sec": 4,
+      "below_120_sec": 4
+    }
+  },
+  "exit": {
+    "flip_stop": {
+      "enabled": true,
+      "price_threshold": 0.48,
+      "check_realtime": true
+    },
+    "stop_loss": {
+      "enabled": true,
+      "check_realtime": true,
+      "per_coin": {
+        "btc": {
+          "enabled": true,
+          "type": "fixed",
+          "value": -12.0
+        },
+        "eth": {
+          "enabled": true,
+          "type": "fixed",
+          "value": -12.0
+        },
+        "sol": {
+          "enabled": true,
+          "type": "fixed",
+          "value": -12.0
+        },
+        "xrp": {
+          "enabled": false,
+          "type": "fixed",
+          "value": -11.0
+        }
+      }
+    }
+  },
+  "execution": {
+    "buy": {
+      "order_type": "FAK",
+      "max_fak_attempts": 3,
+      "retry_delay_sec": 0.3,
+      "min_order_usd": 1.0,
+      "target_fill_percent": 98.0
+    },
+    "sell": {
+      "strategy": "FOK_CHUNKED",
+      "chunk_size": 50,
+      "chunk_delay_sec": 0.1,
+      "max_chunk_retries": 5,
+      "price": 0.01,
+      "min_dust_threshold": 0.1,
+      "sweep_max_attempts": 3,
+      "sweep_retry_delay_sec": 0.1,
+      "sweep_enable_fallback": true,
+      "sweep_fak_attempts": 3,
+      "sweep_market_price": 0.01,
+      "delayed_sweep_enabled": true,
+      "delayed_sweep_delay_sec": 1,
+      "delayed_sweep_min_balance": 0.1,
+      "delayed_sweep_fok_attempts": 3,
+      "delayed_sweep_fak_attempts": 2,
+      "delayed_sweep_retry_delay_sec": 1.0
+    },
+    "redeem": {
+      "startup_check_delay_sec": 60,
+      "first_check_delay_sec": 480,
+      "check_interval_sec": 300,
+      "pause_between_redeems_sec": 1,
+      "sizeThreshold": 0.1,
+      "api_max_retries": 3,
+      "api_retry_delay_sec": 60,
+      "api_timeout_sec": 30,
+      "gas_limit": 500000,
+      "gas_price_multiplier": 1.5,
+      "tx_confirmation_timeout_sec": 180
+    },
+    "rpc_config": {
+      "endpoints": [
+        "https://polygon.drpc.org",
+        "https://polygon.publicnode.com",
+        "https://1rpc.io/matic"
+      ],
+      "single_request_timeout_sec": 10,
+      "parallel_timeout_sec": 15,
+      "retry_attempts": 10,
+      "retry_delay_sec": 0.3,
+      "enable_parallel_requests": true
+    }
+  },
+  "data_sources": {
+    "polymarket": {
+      "gamma_api": "https://gamma-api.polymarket.com",
+      "gamma_timeout_sec": 10,
+      "token_fetch_retry_attempts": 5,
+      "token_fetch_retry_delay_sec": 1.0,
+      "token_fetch_backoff_multiplier": 2.0,
+      "token_fetch_max_backoff_sec": 12.0,
+      "ws_url": "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    }
+  },
+  "display": {
+    "width": 160,
+    "update_interval": 1
+  },
+  "logging": {
+    "trades_file": "logs/trades.jsonl",
+    "session_file": "logs/session.json"
+  },
+  "notifications": {
+    "chart_every_n_markets": 10
+  }
+}

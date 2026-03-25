@@ -1,0 +1,397 @@
+"""
+Late Entry V3 Strategy - Full 15-minute window entry with time-based sizing
+"""
+import time
+import logging
+from typing import Optional, Dict
+
+logger = logging.getLogger("ebisu.strategy")
+
+# Hard ceiling: never enter when pair cost >= this value
+PAIR_COST_CEILING = 0.99  # Must be < 1.00 to have any margin after fees
+
+# Safe bounds for every tunable parameter (min, max)
+PARAM_LIMITS: Dict = {
+    'pair_cost_ceiling':         (0.90, 0.995),
+    'entry_window_sec':          (60,   900),
+    'entry_frequency_sec':       (1,    60),
+    'min_confidence':            (0.40, 0.50),
+    'max_spread':                (1.00, 1.10),
+    'price_min':                 (0.01, 0.49),
+    'price_max':                 (0.50, 0.98),
+    'max_investment_per_market': (10,   1000),
+    'sizing_above_180':          (1,    50),
+    'sizing_above_120':          (1,    50),
+    'sizing_below_120':          (1,    50),
+    'flip_stop_price':           (0.10, 0.49),
+}
+
+
+class LateEntryStrategy:
+    """Late Entry V3 - enter across full 15-minute window, buy the favorite"""
+
+    def __init__(self, config: Dict):
+        # Read ALL params from config (NO HARDCODED VALUES!)
+        strategy_cfg = config.get('strategy', {})
+
+        # Late entry params
+        self.entry_window = strategy_cfg.get('entry_window_sec', 900)
+        self.entry_freq = strategy_cfg.get('entry_frequency_sec', 7)
+        self.min_confidence = max(strategy_cfg.get('min_confidence', 0.40), 0.40)
+        self.max_spread = strategy_cfg.get('max_spread', 1.05)
+        self.price_min = strategy_cfg.get('price_min', 0.10)
+        self.price_max = strategy_cfg.get('price_max', 0.93)
+        
+        # Sizing (contracts) - time-based FROM CONFIG!
+        sizing_cfg = strategy_cfg.get('sizing', {})
+        self.size_above_180 = sizing_cfg.get('above_180_sec', 4)
+        self.size_above_120 = sizing_cfg.get('above_120_sec', 4)
+        self.size_below_120 = sizing_cfg.get('below_120_sec', 4)
+        
+        # Max investment per market
+        self.max_investment = strategy_cfg.get('max_investment_per_market', 20)
+        
+        # Flip-stop price (price reversal protection)
+        exit_cfg = config.get('exit', {})
+        flip_cfg = exit_cfg.get('flip_stop', {})
+        self.flip_stop_price = flip_cfg.get('price_threshold', 0.30)
+        
+        # Pair-cost ceiling (can be tuned via /setparam)
+        self.pair_cost_ceiling = PAIR_COST_CEILING
+
+        # Track last entry per market
+        self.last_entry = {}
+        self.last_favorite = {}
+
+        # Tick counter for periodic pair-cost logging
+        self._tick_count = 0
+    
+    def _pair_cost_ok(self, up_ask: float, down_ask: float) -> bool:
+        """
+        Check if the current asks allow profitable entry.
+        Returns True only if UP_ask + DOWN_ask < PAIR_COST_CEILING.
+        """
+        if not up_ask or not down_ask or up_ask <= 0 or down_ask <= 0:
+            return False  # Can't assess — don't trade
+
+        simple_pair_cost = up_ask + down_ask
+        self._tick_count += 1
+
+        if self._tick_count % 50 == 0:
+            logger.info(
+                "[PAIR_COST_TICK] tick=%d pair=%.4f ceiling=%.4f up=%.3f dn=%.3f",
+                self._tick_count, simple_pair_cost, self.pair_cost_ceiling,
+                up_ask, down_ask,
+            )
+
+        if simple_pair_cost >= self.pair_cost_ceiling:
+            logger.info(
+                "PAIR_COST_BLOCKED simple_pair=%.4f ceiling=%.4f "
+                "ask_up=%.3f ask_down=%.3f",
+                simple_pair_cost, self.pair_cost_ceiling,
+                up_ask, down_ask,
+            )
+            return False
+
+        return True
+
+    def _validate_effective_pair_cost(self, side: str, qty: float, price: float,
+                                      position_stats: Optional[Dict]) -> bool:
+        """
+        Simulate what happens if we accept this fill.
+        Reject if the average entry price (total_invested / total_contracts) >= PAIR_COST_CEILING.
+
+        Prevents over-averaging into a position that can never be profitable.
+        """
+        if not position_stats:
+            return True  # No existing position — allow entry
+
+        up_invested = position_stats.get('up_invested', 0.0)
+        down_invested = position_stats.get('down_invested', 0.0)
+        up_shares = position_stats.get('up_shares', 0.0)
+        down_shares = position_stats.get('down_shares', 0.0)
+
+        # Simulate new inventory
+        if side == 'UP':
+            sim_invested = up_invested + qty * price
+            sim_shares = up_shares + qty
+        else:
+            sim_invested = down_invested + qty * price
+            sim_shares = down_shares + qty
+
+        if sim_shares > 0:
+            effective_avg_price = sim_invested / sim_shares
+            if effective_avg_price >= self.pair_cost_ceiling:
+                logger.warning(
+                    "REJECT_FILL effective_avg_price=%.4f >= %.2f "
+                    "side=%s qty=%.1f price=%.3f",
+                    effective_avg_price, self.pair_cost_ceiling, side, qty, price,
+                )
+                return False
+
+        return True
+
+    def _should_enter(self, market_state: Dict, position_stats: Optional[Dict]) -> Optional[str]:
+        """
+        Decide whether to enter and which side to buy.
+
+        Entry trigger: pair cost is below ceiling (edge exists).
+        Direction: the cheaper side has more upside margin.
+
+        Returns: "UP", "DOWN", or None
+        """
+        up_ask = market_state.get('up_ask', 0)
+        down_ask = market_state.get('down_ask', 0)
+
+        # Step 1: Is there a viable opportunity?
+        if not self._pair_cost_ok(up_ask, down_ask):
+            return None  # No entry — no edge
+
+        # Step 2: Buy the cheaper side (more room to appreciate)
+        if up_ask <= down_ask:
+            default_side = "UP"
+        else:
+            default_side = "DOWN"
+
+        # Step 3: Validate average entry cost won't exceed ceiling
+        fav_price = up_ask if default_side == "UP" else down_ask
+        if not self._validate_effective_pair_cost(default_side, 1.0, fav_price, position_stats):
+            return None  # Averaging up would push cost too high
+
+        return default_side
+
+    def should_enter(self, state: Dict, position: Optional[Dict] = None) -> Optional[Dict]:
+        """
+        Check if should enter (Late Entry V3 logic)
+        
+        Args:
+            state: Market state with keys:
+                - market_slug: str
+                - seconds_till_end: int
+                - up_ask: float
+                - down_ask: float
+            position: Optional position stats
+        
+        Returns:
+            Signal dict or None
+        """
+        market = state['market_slug']
+        time_left = state['seconds_till_end']
+        up_ask = state['up_ask']
+        down_ask = state['down_ask']
+        
+        # TIME: full window, but kill switch in final 30 s
+        if time_left > self.entry_window or time_left < 30:
+            return None
+        
+        # FREQUENCY
+        now = time.time()
+        if market in self.last_entry and now - self.last_entry[market] < self.entry_freq:
+            return None
+        
+        # Hard pair-cost gate — no orders if pair cost is unprofitable
+        if not self._pair_cost_ok(up_ask, down_ask):
+            return None  # No maker orders when pair cost is too high
+
+        # Pair cost passed — log every subsequent block so we can see why dips are missed
+        pair_cost = up_ask + down_ask
+
+        # ─────────────────────────────────────────────────────────
+        # ARBITRAGE CHECK: log arb-like setups, but do not enter both sides.
+        # Arb mode stays disabled until we can use maker orders.
+        # ─────────────────────────────────────────────────────────
+        ARB_SIDE_THRESHOLD = 0.45
+        arb_condition = min(up_ask, down_ask) < ARB_SIDE_THRESHOLD
+        logger.info(
+            "[ARB_CHECK] pair_cost=%.3f ceiling=%.3f arb=%s up=%.3f dn=%.3f stc=%ds %s",
+            pair_cost, self.pair_cost_ceiling,
+            "YES" if arb_condition else "NO",
+            up_ask, down_ask, time_left, market,
+        )
+        if arb_condition:
+            logger.info(
+                "[ARB_DISABLED] pair_cost=%.3f -- arb mode disabled, checking directional",
+                pair_cost,
+            )
+
+        # ─────────────────────────────────────────────────────────
+        # DIRECTIONAL MODE (fallback when no ARB edge)
+        # ─────────────────────────────────────────────────────────
+
+        # CONFIDENCE (min spread between sides indicates market has picked a side)
+        confidence = abs(up_ask - down_ask)
+        if confidence < self.min_confidence:
+            logger.warning(
+                "SKIP_CONFIDENCE pair=%.4f conf=%.4f < %.2f stc=%ds up=%.3f dn=%.3f %s",
+                pair_cost, confidence, self.min_confidence, time_left,
+                up_ask, down_ask, market,
+            )
+            return None
+
+        # Determine entry side via pair-cost-driven logic
+        side = self._should_enter(state, position)
+        if side is None:
+            return None  # REJECT_FILL already warns on effective-avg failure
+
+        fav_price = up_ask if side == 'UP' else down_ask
+
+        # PRICE MIN
+        if fav_price < self.price_min:
+            logger.warning(
+                "SKIP_PRICE_MIN pair=%.4f fav=%.3f < %.2f side=%s stc=%ds %s",
+                pair_cost, fav_price, self.price_min, side, time_left, market,
+            )
+            return None
+
+        # PRICE MAX
+        if fav_price > self.price_max:
+            logger.warning(
+                "SKIP_PRICE_MAX pair=%.4f fav=%.3f > %.2f side=%s stc=%ds %s",
+                pair_cost, fav_price, self.price_max, side, time_left, market,
+            )
+            return None
+
+        # POSITION SIZE CAP - only one open entry per market and hard $2 ceiling
+        if position:
+            up_shares = position.get('up_shares', 0.0)
+            dn_shares = position.get('down_shares', 0.0)
+            up_invested = position.get('up_invested', 0.0)
+            dn_invested = position.get('down_invested', 0.0)
+            current_value = position.get('total_cost', up_invested + dn_invested)
+            if up_shares > 0 or dn_shares > 0:
+                logger.info(
+                    "POSITION_CAP_BLOCKED market=%s current_value=%.2f",
+                    market, current_value,
+                )
+                return None
+            if current_value >= 2.00:
+                logger.info(
+                    "POSITION_CAP_BLOCKED market=%s current_value=%.2f",
+                    market, current_value,
+                )
+                return None
+
+        # INVESTMENT LIMIT
+        if position:
+            total_cost = position.get('total_cost', 0)
+            if total_cost >= self.max_investment:
+                logger.warning(
+                    "SKIP_INVEST_LIMIT pair=%.4f invested=%.2f >= %.2f stc=%ds %s",
+                    pair_cost, total_cost, self.max_investment, time_left, market,
+                )
+                return None
+
+        # RISK CHECKS - stop-loss removed, only flip-stop via main.py
+        # Flip-stop logic in main.py (check: our_price <= strategy.flip_stop_price)
+
+        # ENTRY
+        size = self.size_above_180 if time_left > 180 else (self.size_above_120 if time_left > 120 else self.size_below_120)
+
+        self.last_entry[market] = now
+        self.last_favorite[market] = side
+
+        logger.info(
+            "[DIR_ENTRY] pair_cost=%.4f side=%s fav=%.3f stc=%ds %s",
+            pair_cost, side, fav_price, time_left, market,
+        )
+
+        return {
+            'favored': {
+                'side': side,
+                'price': fav_price,
+                'contracts': size,
+            },
+            'hedge': {
+                'side': 'DOWN' if side == 'UP' else 'UP',
+                'price': down_ask if side == 'UP' else up_ask,
+                'contracts': 0,
+            },
+            'confidence': confidence,
+            'is_recovery': False,
+            'is_arbitrage': False,
+            'entry_reason': f'late_entry_{time_left}s',
+            'winner_ratio': 0.0
+        }
+    
+    def get_stats(self) -> Dict:
+        """Get strategy statistics (for dashboard compatibility)"""
+        return {
+            'generated': 0,
+            'skipped': 0,
+            'total': 0,
+            'skip_breakdown': {},
+            'gen_pct': 0,
+            'skip_pct': 0,
+            'wr_recoveries': 0
+        }
+    
+    def reload_config(self, params: Dict):
+        """
+        Hot-reload strategy parameters from a flat dict (e.g. loaded from DB).
+        All values are clamped to PARAM_LIMITS before applying.
+        Unknown keys are ignored.
+        """
+        def clamp(key, val):
+            lo, hi = PARAM_LIMITS.get(key, (None, None))
+            if lo is None:
+                return val
+            return max(lo, min(hi, val))
+
+        changed = []
+        for key, raw in params.items():
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                continue
+            safe = clamp(key, val)
+            if key == 'pair_cost_ceiling':
+                self.pair_cost_ceiling = safe; changed.append(f"pair_cost_ceiling={safe}")
+            elif key == 'entry_window_sec':
+                self.entry_window = int(safe); changed.append(f"entry_window={int(safe)}")
+            elif key == 'entry_frequency_sec':
+                self.entry_freq = int(safe); changed.append(f"entry_freq={int(safe)}")
+            elif key == 'min_confidence':
+                self.min_confidence = safe; changed.append(f"min_confidence={safe}")
+            elif key == 'max_spread':
+                self.max_spread = safe; changed.append(f"max_spread={safe}")
+            elif key == 'price_min':
+                self.price_min = safe; changed.append(f"price_min={safe}")
+            elif key == 'price_max':
+                self.price_max = safe; changed.append(f"price_max={safe}")
+            elif key == 'max_investment_per_market':
+                self.max_investment = safe; changed.append(f"max_investment={safe}")
+            elif key == 'sizing_above_180':
+                self.size_above_180 = int(safe); changed.append(f"size_above_180={int(safe)}")
+            elif key == 'sizing_above_120':
+                self.size_above_120 = int(safe); changed.append(f"size_above_120={int(safe)}")
+            elif key == 'sizing_below_120':
+                self.size_below_120 = int(safe); changed.append(f"size_below_120={int(safe)}")
+            elif key == 'flip_stop_price':
+                self.flip_stop_price = safe; changed.append(f"flip_stop_price={safe}")
+        if changed:
+            logger.info("Strategy config reloaded: %s", ", ".join(changed))
+        return changed
+
+    def get_config(self) -> Dict:
+        """Return current tunable parameters as a flat dict (for /showparams)"""
+        return {
+            'pair_cost_ceiling':         self.pair_cost_ceiling,
+            'entry_window_sec':          self.entry_window,
+            'entry_frequency_sec':       self.entry_freq,
+            'min_confidence':            self.min_confidence,
+            'max_spread':                self.max_spread,
+            'price_min':                 self.price_min,
+            'price_max':                 self.price_max,
+            'max_investment_per_market': self.max_investment,
+            'sizing_above_180':          self.size_above_180,
+            'sizing_above_120':          self.size_above_120,
+            'sizing_below_120':          self.size_below_120,
+            'flip_stop_price':           self.flip_stop_price,
+        }
+
+    def reset_market(self, market_slug: str):
+        """Reset tracking for a market"""
+        if market_slug in self.last_entry:
+            del self.last_entry[market_slug]
+        if market_slug in self.last_favorite:
+            del self.last_favorite[market_slug]

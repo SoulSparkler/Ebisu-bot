@@ -149,6 +149,12 @@ class OrderExecutor:
 
     def _default_rpc_endpoint(self) -> str:
         return self.rpc_endpoints[0] if self.rpc_endpoints else DEFAULT_POLYGON_RPC_ENDPOINTS[0]
+
+    @staticmethod
+    def _short_address(address: Optional[str]) -> str:
+        if not address:
+            return "<missing>"
+        return f"{address[:10]}...{address[-8:]}"
     
     def __init__(self, safety_guard: SafetyGuard, config: Dict, data_feed=None):
         self.safety = safety_guard
@@ -158,6 +164,8 @@ class OrderExecutor:
         # Initialize CLOB client
         self.client = None
         self.wallet_address = None
+        self.signer_address = None
+        self.signature_type = 0
         
         if not self.safety.dry_run:
             try:
@@ -171,22 +179,24 @@ class OrderExecutor:
                 self.private_key = os.getenv("PRIVATE_KEY", "")
                 if not self.private_key:
                     raise ValueError("PRIVATE_KEY not found in .env")
+                self.signer_address = Account.from_key(self.private_key).address
                 
                 # Read signature type and funder address
                 signature_type = int(os.getenv("SIGNATURE_TYPE", "0"))
                 funder_address = os.getenv("FUNDER_ADDRESS", "")
+                proxy_wallet = os.getenv("PROXY_WALLET", "")
+                self.signature_type = signature_type
                 
                 # Get wallet address based on SIGNATURE_TYPE
                 # Type 0: Use address from PRIVATE_KEY (standard EOA wallet)
                 # Type 1/2: Use FUNDER_ADDRESS (Polymarket proxy/smart contract wallet)
                 if signature_type == 0:
-                    self.wallet_address = Account.from_key(self.private_key).address
+                    self.wallet_address = self.signer_address
                     wallet_type = "EOA"
                 else:
                     if not funder_address:
                         raise ValueError(f"SIGNATURE_TYPE={signature_type} requires FUNDER_ADDRESS in .env")
                     # Use PROXY_WALLET for balance checks if set (funds may be deposited directly there)
-                    proxy_wallet = os.getenv("PROXY_WALLET", "")
                     self.wallet_address = proxy_wallet if proxy_wallet else funder_address
                     wallet_type = f"Proxy (type {signature_type})"
                 
@@ -278,7 +288,48 @@ class OrderExecutor:
         
         # Callback for checking market close (race condition protection)
         self.market_closing_check_callback = None
-    
+
+    @staticmethod
+    def _market_coin(market_slug: str) -> Optional[str]:
+        for coin in ['btc', 'eth', 'sol', 'xrp']:
+            if f'{coin}-updown-' in market_slug:
+                return coin
+        return None
+
+    def _handle_redeem_success(self, market_slug: str, amount_received: float):
+        """Refresh balance state and unblock the market after a confirmed redeem."""
+        time.sleep(3)
+        print(f"[REDEEM] 🔄 Checking balance after 3s delay...")
+
+        try:
+            updated_balance = self.get_wallet_usdc_balance()
+
+            if updated_balance is not None and updated_balance > 0:
+                print(f"[REDEEM] 💰 Blockchain balance refreshed: ${updated_balance:.2f}")
+
+                if self.balance_change_callback:
+                    self.balance_change_callback(updated_balance, "REDEEM_REFRESH", is_absolute=True)
+                    print(f"[REDEEM] ✅ Balance callback called with ${updated_balance:.2f}")
+            else:
+                print(f"[REDEEM] ⚠️ Blockchain query returned None/0, using local update")
+                if self.balance_change_callback:
+                    self.balance_change_callback(+amount_received, "REDEEM")
+                    print(f"[REDEEM] ✅ Balance callback called with +${amount_received:.2f}")
+        except Exception as e:
+            print(f"[REDEEM] ⚠️ Failed to refresh balance: {e}")
+            import traceback
+            traceback.print_exc()
+            if self.balance_change_callback:
+                self.balance_change_callback(+amount_received, "REDEEM")
+                print(f"[REDEEM] ✅ Balance callback called with +${amount_received:.2f} (fallback)")
+
+        coin = self._market_coin(market_slug)
+        if coin:
+            OrderExecutor.unblock_market(market_slug, coin)
+            print(f"[REDEEM] 🔓 Market unblocked for {coin.upper()}")
+        else:
+            print(f"[REDEEM] ⚠️ Could not determine coin from slug: {market_slug}")
+
     def set_balance_callback(self, callback):
         """
         Set callback for balance changes
@@ -905,6 +956,8 @@ class OrderExecutor:
         MIN_DUST_THRESHOLD = exec_config.get('min_dust_threshold', 0.1)
         SWEEP_MAX_ATTEMPTS = exec_config.get('sweep_max_attempts', 3)
         SWEEP_RETRY_DELAY = exec_config.get('sweep_retry_delay_sec', 1.0)
+        ZERO_BALANCE_RETRY_ATTEMPTS = exec_config.get('zero_balance_retry_attempts', 5)
+        ZERO_BALANCE_RETRY_DELAY = exec_config.get('zero_balance_retry_delay_sec', 1.0)
         
         # Log parameters
         print(f"\n[EXECUTOR] {'='*60}")
@@ -921,6 +974,7 @@ class OrderExecutor:
         print(f"[EXECUTOR]    Max Chunk Retries: {MAX_CHUNK_RETRIES}")
         print(f"[EXECUTOR]    Price: ${PRICE:.2f} (aggressive market order)")
         print(f"[EXECUTOR]    Dust Threshold: {MIN_DUST_THRESHOLD}")
+        print(f"[EXECUTOR]    Zero-balance retries: {ZERO_BALANCE_RETRY_ATTEMPTS} x {ZERO_BALANCE_RETRY_DELAY}s")
         print(f"[EXECUTOR] {'='*60}\n")
         
         # ═══════════════════════════════════════════════════════════
@@ -944,8 +998,44 @@ class OrderExecutor:
         
         print(f"[EXECUTOR] ✓ Blockchain balance: {initial_balance:.4f} contracts")
         
-        # Check: if balance is already near 0
+        # A fresh fill can take a few seconds to appear on all RPCs, especially for
+        # proxy/Safe wallets. If we still track contracts but the balance reads 0,
+        # wait briefly and re-check before concluding there is nothing to sell.
+        if initial_balance < MIN_DUST_THRESHOLD and contracts >= MIN_DUST_THRESHOLD:
+            print(
+                f"[EXECUTOR] ⚠️  Balance is 0 but tracked position is {contracts:.2f} contracts; "
+                f"waiting for token balance to become visible..."
+            )
+            for retry_idx in range(1, ZERO_BALANCE_RETRY_ATTEMPTS + 1):
+                time.sleep(ZERO_BALANCE_RETRY_DELAY)
+                refreshed_balance = self.get_blockchain_token_balance(token_id)
+                if refreshed_balance is None:
+                    print(
+                        f"[EXECUTOR] ⚠️  Balance refresh {retry_idx}/{ZERO_BALANCE_RETRY_ATTEMPTS} "
+                        f"failed; retrying..."
+                    )
+                    continue
+
+                initial_balance = refreshed_balance
+                print(
+                    f"[EXECUTOR] 🔄 Balance refresh {retry_idx}/{ZERO_BALANCE_RETRY_ATTEMPTS}: "
+                    f"{initial_balance:.4f} contracts"
+                )
+                if initial_balance >= MIN_DUST_THRESHOLD:
+                    break
+
         if initial_balance < MIN_DUST_THRESHOLD:
+            if contracts >= MIN_DUST_THRESHOLD:
+                print(
+                    f"[EXECUTOR] ❌ Token balance still invisible after retries for tracked "
+                    f"position {contracts:.2f}; refusing to mark sell as complete"
+                )
+                return OrderResult(
+                    success=False,
+                    error="TOKEN_BALANCE_NOT_VISIBLE_YET",
+                    remaining_balance=0.0
+                )
+
             print(f"[EXECUTOR] ✓ Balance below dust threshold ({MIN_DUST_THRESHOLD}), nothing to sell")
             return OrderResult(
                 success=True,
@@ -2254,8 +2344,20 @@ class OrderExecutor:
             print(f"  Oracle resolved: {winner} won!")
             
             # Build redeem transaction
-            redeem_from_address = Account.from_key(self.private_key).address
-            nonce = w3.eth.get_transaction_count(self.wallet_address)
+            redeem_from_address = self.signer_address or Account.from_key(self.private_key).address
+
+            # Direct CTF/adapter calls can only redeem tokens held by the tx sender.
+            # Proxy wallets therefore cannot be redeemed with the raw EOA tx path below.
+            if self.wallet_address and redeem_from_address and self.wallet_address.lower() != redeem_from_address.lower():
+                reason = "PROXY_REDEEM_REQUIRES_WALLET_OWNER_EXECUTION"
+                self._log_redeem(market_slug, False, 0.0, "", reason)
+                print(f"[REDEEM] ⚠ Direct redeem skipped: proxy wallet cannot be redeemed by raw EOA tx")
+                print(f"[REDEEM]    Token holder: {self._short_address(self.wallet_address)}")
+                print(f"[REDEEM]    Signer: {self._short_address(redeem_from_address)}")
+                print(f"[REDEEM]    signature_type={self.signature_type} requires execution from the token-holding wallet")
+                return False, 0.0
+
+            nonce = w3.eth.get_transaction_count(redeem_from_address, 'pending')
             gas_price = w3.eth.gas_price
             
             if neg_risk:
@@ -2307,61 +2409,7 @@ class OrderExecutor:
                         self._log_redeem(market_slug, True, amount_received, tx_hash.hex(), f"WINNER_{winner}")
                         print(f"[REDEEM] ✅ Redeemed ${amount_received:.2f} USDC!")
                         print(f"[REDEEM] TX Hash: {tx_hash.hex()}")
-                        
-                        # Wait 3 seconds before balance update (let blockchain settle)
-                        import asyncio
-                        try:
-                            # Try to use asyncio.sleep if in async context
-                            asyncio.get_event_loop()
-                            import time
-                            time.sleep(3)
-                        except RuntimeError:
-                            # Not in async context, use regular sleep
-                            import time
-                            time.sleep(3)
-                        
-                        print(f"[REDEEM] 🔄 Checking balance after 3s delay...")
-                        
-                        # Refresh balance from blockchain for exact amount
-                        try:
-                            updated_balance = self.get_wallet_usdc_balance()
-                            
-                            if updated_balance is not None and updated_balance > 0:
-                                print(f"[REDEEM] 💰 Blockchain balance refreshed: ${updated_balance:.2f}")
-                                
-                                # Update local balance with exact value from blockchain
-                                if self.balance_change_callback:
-                                    self.balance_change_callback(updated_balance, "REDEEM_REFRESH", is_absolute=True)
-                                    print(f"[REDEEM] ✅ Balance callback called with ${updated_balance:.2f}")
-                            else:
-                                print(f"[REDEEM] ⚠️ Blockchain query returned None/0, using local update")
-                                # Fallback to local update
-                                if self.balance_change_callback:
-                                    self.balance_change_callback(+amount_received, "REDEEM")
-                                    print(f"[REDEEM] ✅ Balance callback called with +${amount_received:.2f}")
-                        except Exception as e:
-                            print(f"[REDEEM] ⚠️ Failed to refresh balance: {e}")
-                            import traceback
-                            traceback.print_exc()
-                            # Fallback to local update
-                            if self.balance_change_callback:
-                                self.balance_change_callback(+amount_received, "REDEEM")
-                                print(f"[REDEEM] ✅ Balance callback called with +${amount_received:.2f} (fallback)")
-                        
-                        # 🔥 UNBLOCK MARKET after successful redeem (per-coin)
-                        # Extract coin from market_slug (e.g., "btc-updown-15m-..." → "btc")
-                        coin = None
-                        for c in ['btc', 'eth', 'sol', 'xrp']:
-                            if f'{c}-updown-' in market_slug:
-                                coin = c
-                                break
-                        
-                        if coin:
-                            OrderExecutor.unblock_market(market_slug, coin)
-                            print(f"[REDEEM] 🔓 Market unblocked for {coin.upper()}")
-                        else:
-                            print(f"[REDEEM] ⚠️ Could not determine coin from slug: {market_slug}")
-                        
+                        self._handle_redeem_success(market_slug, amount_received)
                         return True, amount_received
                     else:
                         self._log_redeem(market_slug, False, 0.0, tx_hash.hex(), "TX_REVERTED")
@@ -2384,7 +2432,7 @@ class OrderExecutor:
                             gas_multiplier *= 1.2
                             
                             # Rebuild transaction with higher gas
-                            nonce = w3.eth.get_transaction_count(self.wallet_address)
+                            nonce = w3.eth.get_transaction_count(redeem_from_address, 'pending')
                             gas_price = w3.eth.gas_price
                             
                             if neg_risk:

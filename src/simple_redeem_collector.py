@@ -918,8 +918,14 @@ class SimpleRedeemCollector:
             f"{', '.join(f'{wallet[:10]}...{wallet[-8:]}' for wallet in wallets)}"
         )
 
-        merged_positions = []
-        seen = set()
+        def _numeric(value) -> float:
+            try:
+                return float(value or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        merged_by_market = {}
+        raw_positions = 0
         successful_queries = 0
 
         for wallet in wallets:
@@ -929,24 +935,44 @@ class SimpleRedeemCollector:
 
             successful_queries += 1
             for position in positions:
+                raw_positions += 1
+                slug = position.get('slug') or position.get('marketSlug') or ''
+                condition_id = position.get('conditionId') or ''
                 key = (
-                    position.get('slug'),
-                    position.get('conditionId'),
-                    position.get('outcome'),
+                    slug,
+                    condition_id,
                 )
-                if key in seen:
-                    continue
-                seen.add(key)
                 enriched = dict(position)
                 enriched['_collector_wallet'] = wallet
-                merged_positions.append(enriched)
+                existing = merged_by_market.get(key)
+                if not existing:
+                    merged_by_market[key] = enriched
+                    continue
+
+                existing['size'] = _numeric(existing.get('size')) + _numeric(enriched.get('size'))
+                existing['currentValue'] = _numeric(existing.get('currentValue')) + _numeric(enriched.get('currentValue'))
+
+                for field in ('slug', 'marketSlug', 'conditionId', 'negativeRisk', 'negRisk'):
+                    if existing.get(field) in (None, '', []) and enriched.get(field) not in (None, '', []):
+                        existing[field] = enriched.get(field)
+
+                existing_outcome = existing.get('outcome')
+                incoming_outcome = enriched.get('outcome')
+                if existing_outcome and incoming_outcome and existing_outcome != incoming_outcome:
+                    existing['outcome'] = 'MULTI'
+                elif not existing_outcome and incoming_outcome:
+                    existing['outcome'] = incoming_outcome
 
         if successful_queries == 0:
             return None
 
+        merged_positions = list(merged_by_market.values())
+        merged_positions.sort(key=lambda item: _numeric(item.get('currentValue')), reverse=True)
+
         print(
-            f"[REDEEM COLLECTOR] Merged {len(merged_positions)} unique position(s) "
-            f"across {successful_queries} successful wallet quer{'y' if successful_queries == 1 else 'ies'}"
+            f"[REDEEM COLLECTOR] Merged {len(merged_positions)} unique market(s) "
+            f"from {raw_positions} position row(s) across "
+            f"{successful_queries} successful wallet quer{'y' if successful_queries == 1 else 'ies'}"
         )
         return merged_positions
 
