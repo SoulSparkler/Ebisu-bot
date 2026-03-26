@@ -32,9 +32,9 @@
     "price_max": 0.92,
     "max_investment_per_market": 20,
     "sizing": {
-      "above_180_sec": 4,
-      "above_120_sec": 4,
-      "below_120_sec": 4
+      "above_180_sec": 1,
+      "above_120_sec": 1,
+      "below_120_sec": 1
     }
   },
   "exit": {

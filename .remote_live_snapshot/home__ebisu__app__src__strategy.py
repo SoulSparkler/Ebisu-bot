@@ -147,8 +147,8 @@ class LateEntryStrategy:
         if not self._pair_cost_ok(up_ask, down_ask):
             return None  # No entry — no edge
 
-        # Step 2: Buy the cheaper side (more room to appreciate)
-        if up_ask <= down_ask:
+        # Step 2: Buy the favorite (higher ask = market consensus winner)
+        if up_ask >= down_ask:
             default_side = "UP"
         else:
             default_side = "DOWN"
